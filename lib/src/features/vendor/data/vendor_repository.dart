@@ -335,6 +335,34 @@ class VendorRepository {
     );
   }
 
+  Future<void> submitAdditionalBill(
+    String id, {
+    required double amount,
+    String? note,
+    File? photo,
+  }) async {
+    final photoUrls = <String>[];
+    if (photo != null) {
+      final uploaded = await uploadVendorAsset(
+        '',
+        photo,
+        'service-bills',
+        photo.path.split(RegExp(r'[\\/]')).last,
+        'image/jpeg',
+      );
+      photoUrls.add(uploaded);
+    }
+    await _api.postJson(
+      '/api/v1/vendor/bookings/$id/additional-bill',
+      body: {
+        'amount': amount,
+        if (note != null && note.trim().isNotEmpty) 'note': note.trim(),
+        'photoUrls': photoUrls,
+      },
+      auth: true,
+    );
+  }
+
   Future<void> verifyBookingCompletionOtp(String id, String otp) async {
     await _api.postJson('/api/v1/vendor/bookings/$id/completion-otp',
         body: {'otp': otp}, auth: true);

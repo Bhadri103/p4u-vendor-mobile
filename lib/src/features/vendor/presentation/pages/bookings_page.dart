@@ -34,6 +34,7 @@ class BookingsPage extends ConsumerWidget {
           final active = items
               .where((b) => [
                     'in_progress',
+                    'bill_pending_acceptance',
                     'completion_pending',
                     'completion_pending_confirmation'
                   ].contains(b['status']))
@@ -123,6 +124,26 @@ class _Section extends ConsumerWidget {
               : <String, dynamic>{};
           final serviceImage = _serviceImage(b, metadata, service);
           final proofPhotos = _completionPhotoUrls(b, metadata);
+          final bill = metadata['additionalBill'] is Map
+              ? Map<String, dynamic>.from(metadata['additionalBill'] as Map)
+              : null;
+          final billAmount = bill == null
+              ? 0.0
+              : (bill['amount'] is num
+                  ? (bill['amount'] as num).toDouble()
+                  : double.tryParse('${bill['amount']}') ?? 0);
+          final billNote = bill?['note']?.toString().trim() ?? '';
+          final billPhotos = bill?['photoUrls'] is List
+              ? (bill!['photoUrls'] as List)
+                  .map((e) => e.toString())
+                  .where((e) => e.trim().isNotEmpty)
+                  .toList()
+              : <String>[];
+          final billBase = bill == null
+              ? 0.0
+              : (bill['baseAmountAtSubmit'] is num
+                  ? (bill['baseAmountAtSubmit'] as num).toDouble()
+                  : double.tryParse('${bill['baseAmountAtSubmit']}') ?? 0);
           final canCancel = status == 'approved' || status == 'in_progress';
           return Padding(
             padding: const EdgeInsets.only(bottom: 10),
@@ -178,6 +199,50 @@ class _Section extends ConsumerWidget {
                       currency
                           .format(b['total_amount'] ?? service['price'] ?? 0),
                       style: const TextStyle(fontWeight: FontWeight.w600)),
+                  if (bill != null) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFFBEB),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFFDE68A)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Extra bill: ${currency.format(billAmount)}'
+                            '${billBase > 0 ? ' · new total ${currency.format(billBase + billAmount)}' : ''}',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF92400E),
+                              fontSize: 12,
+                            ),
+                          ),
+                          if (billNote.isNotEmpty)
+                            Text('Note: $billNote',
+                                style: const TextStyle(
+                                    fontSize: 12, color: Color(0xFF92400E))),
+                          if (billPhotos.isNotEmpty) ...[
+                            const SizedBox(height: 6),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Image.network(
+                                billPhotos.first,
+                                height: 80,
+                                width: 120,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) =>
+                                    const SizedBox.shrink(),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 8),
                   Wrap(
                     spacing: 8,
@@ -195,10 +260,21 @@ class _Section extends ConsumerWidget {
                         FilledButton(
                             onPressed: () => _update(ref, b, 'in_progress'),
                             child: const Text('Start Service')),
-                      if (status == 'in_progress')
+                      if (status == 'in_progress') ...[
+                        OutlinedButton(
+                            onPressed: () => _addBill(context, ref, b),
+                            child: const Text('Add Bill')),
                         FilledButton(
                             onPressed: () => _complete(context, ref, b),
                             child: const Text('Complete')),
+                      ],
+                      if (status == 'bill_pending_acceptance')
+                        const Text(
+                            'Waiting for customer bill approval before OTP',
+                            style: TextStyle(
+                                color: AppColors.amber,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 12)),
                       if (status == 'completion_pending')
                         FilledButton(
                             onPressed: () =>
@@ -265,6 +341,86 @@ class _Section extends ConsumerWidget {
     await ref
         .read(vendorRepositoryProvider)
         .updateBookingStatus(booking['id'].toString(), status);
+    ref.invalidate(vendorBookingsProvider);
+  }
+
+  Future<void> _addBill(
+      BuildContext context, WidgetRef ref, Map<String, dynamic> booking) async {
+    final amount = TextEditingController();
+    final note = TextEditingController();
+    XFile? photo;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Additional Bill'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Customer must accept this amount before you can complete with OTP.',
+                  style: TextStyle(fontSize: 12, color: AppColors.muted),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: amount,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Extra amount (INR)',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: note,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'Note (optional)',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final picked = await ImagePicker()
+                        .pickImage(source: ImageSource.gallery, imageQuality: 80);
+                    if (picked != null) setDialogState(() => photo = picked);
+                  },
+                  icon: Icon(photo == null
+                      ? Icons.image_rounded
+                      : Icons.check_circle_rounded),
+                  label: Text(photo == null ? 'Add bill photo' : 'Photo selected'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Send')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final value = double.tryParse(amount.text.trim());
+    if (value == null || value <= 0) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Enter a valid amount greater than zero')),
+        );
+      }
+      return;
+    }
+    await ref.read(vendorRepositoryProvider).submitAdditionalBill(
+          booking['id'].toString(),
+          amount: value,
+          note: note.text.trim(),
+          photo: photo == null ? null : File(photo!.path),
+        );
     ref.invalidate(vendorBookingsProvider);
   }
 
