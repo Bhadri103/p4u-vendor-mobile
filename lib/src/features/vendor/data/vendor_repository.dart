@@ -1,0 +1,1656 @@
+import 'dart:convert';
+import 'dart:io';
+
+import '../../../core/services/api_client.dart';
+import '../domain/vendor_models.dart';
+import 'bank_accounts.dart';
+
+class VendorRepository {
+  VendorRepository({ApiClient? api}) : _api = api ?? ApiClient();
+
+  final ApiClient _api;
+
+  /// Last loaded booking-availability DTO — cached so a save can preserve the
+  /// fields the mobile editor doesn't expose (todayClosed, defaultSlotMinutes,
+  /// per-day bufferMinutes, dateOffs/holidays) instead of wiping them.
+  Map<String, dynamic>? _availabilityDto;
+
+  Future<VendorDashboard> dashboard(String vendorId) async {
+    final vendor = await profile(vendorId);
+    final vendorType = _vendorType(vendor);
+    final hasProductFlow = vendorType != 'SERVICE';
+    final hasServiceFlow = vendorType == 'SERVICE' || vendorType == 'BOTH';
+
+    final productsFuture = hasProductFlow
+        ? products(vendorId)
+        : Future.value(<Map<String, dynamic>>[]);
+    final servicesFuture = hasServiceFlow
+        ? services(vendorId)
+        : Future.value(<Map<String, dynamic>>[]);
+    final ordersFuture = hasProductFlow
+        ? orders(vendorId)
+        : hasServiceFlow
+            ? bookings(vendorId)
+            : Future.value(<Map<String, dynamic>>[]);
+    final settlementsFuture = settlements(vendorId);
+
+    final ratingFuture = ratingSummary(vendorId);
+
+    final results = await Future.wait<Object>([
+      productsFuture,
+      servicesFuture,
+      ordersFuture,
+      settlementsFuture,
+      ratingFuture,
+    ]);
+
+    return VendorDashboard(
+      vendor: {...vendor, ...(results[4] as Map<String, dynamic>)},
+      products: results[0] as List<Map<String, dynamic>>,
+      services: results[1] as List<Map<String, dynamic>>,
+      orders: results[2] as List<Map<String, dynamic>>,
+      settlements: results[3] as List<Map<String, dynamic>>,
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> products(String vendorId) async {
+    final rows = await _safeList(() => _api.getList(
+        '/api/v1/vendor/me/products',
+        query: {'limit': 500, 'offset': 0},
+        auth: true));
+    return rows.map(_normalizeProduct).toList();
+  }
+
+  Future<Map<String, dynamic>> product(String id) async {
+    final row =
+        await _api.getJson('/api/v1/vendor/me/products/$id', auth: true);
+    return _normalizeProduct(row);
+  }
+
+  Future<String?> checkVendorPhoneUnique(String phone) async {
+    final cleaned = phone.replaceAll(RegExp(r'\D'), '');
+    if (cleaned.length != 10) return null;
+    final normalized = '+91$cleaned';
+    try {
+      final data = await _api.postJson('/api/auth/public/vendor/phone-status',
+          body: {'phone': normalized});
+      final available = data['available'] ?? data['isAvailable'];
+      if (available == false) {
+        return 'This mobile number is already registered as a vendor.';
+      }
+      final status = data.s('status').toLowerCase();
+      if (['registered', 'pending', 'submitted', 'approved'].contains(status)) {
+        return 'A vendor account or application with this phone number already exists.';
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<String?> checkVendorEmailUnique(String email) async {
+    final normalized = email.trim().toLowerCase();
+    if (normalized.isEmpty) return null;
+    try {
+      final data = await _api.postJson('/api/auth/public/vendor/email-status',
+          body: {'email': normalized});
+      if (data['available'] == false) {
+        return 'This email is already linked to an account or vendor application.';
+      }
+    } catch (_) {
+      // This endpoint is only an early convenience check. Some deployed API
+      // versions do not expose it yet, so final registration remains the
+      // authoritative duplicate check and must not be blocked here.
+    }
+    return null;
+  }
+
+  Future<List<Map<String, dynamic>>> registrationProductCategories() async {
+    final rows = await _api.getList('/api/v1/catalog/categories', query: {
+      'kind': 'product',
+      'limit': 100,
+      'offset': 0,
+      'includeInactive': false,
+    });
+    final seen = <String>{};
+    final categories = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      final id = row.s('id').trim();
+      final name = row.s('name').trim();
+      if (id.isEmpty || name.isEmpty || !seen.add(id)) continue;
+      categories.add({
+        'id': id,
+        'name': name,
+        'slug': row.s('slug', name),
+      });
+    }
+    categories.sort((a, b) =>
+        a.s('name').toLowerCase().compareTo(b.s('name').toLowerCase()));
+    return categories;
+  }
+
+  Future<List<Map<String, dynamic>>> registrationServiceCategories() async {
+    final rows = await _api.getList('/api/v1/catalog/categories', query: {
+      'kind': 'service',
+      'limit': 100,
+      'offset': 0,
+      'includeInactive': false,
+    });
+    final seen = <String>{};
+    final categories = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      final id = row.s('id').trim();
+      final name = row.s('name').trim();
+      if (id.isEmpty || name.isEmpty || !seen.add(id)) continue;
+      categories.add({
+        'id': id,
+        'name': name,
+        'slug': row.s('slug', name),
+      });
+    }
+    categories.sort((a, b) =>
+        a.s('name').toLowerCase().compareTo(b.s('name').toLowerCase()));
+    return categories;
+  }
+
+  Future<String> uploadRegistrationFile(
+      File file, String field, String contentType) async {
+    final fileName = file.path.split(RegExp(r'[\\/]')).last;
+    if (!await apiSession.hasToken()) return fileName;
+    final path = contentType == 'application/pdf'
+        ? '/api/v1/vendor/me/documents/upload'
+        : '/api/v1/vendor/me/upload';
+    final data =
+        await _api.uploadFile(path, file, contentType: contentType, auth: true);
+    return _uploadedUrl(data);
+  }
+
+  Future<void> submitVendorApplication(Map<String, dynamic> payload) async {
+    await _api.postJson('/api/auth/public/vendor/register',
+        body: _vendorRegistrationPayload(payload));
+  }
+
+  Future<void> upsertProduct(String vendorId, Map<String, dynamic> values,
+      {String? id}) async {
+    final payload = _productPayload(values);
+    if (id == null || id.trim().isEmpty) {
+      await _api.postJson('/api/v1/vendor/me/products',
+          body: payload, auth: true);
+    } else {
+      await _api.patchJson('/api/v1/vendor/me/products/$id',
+          body: payload, auth: true);
+    }
+  }
+
+  Future<void> deleteProduct(String id) async {
+    await _api.deleteJson('/api/v1/vendor/me/products/$id', auth: true);
+  }
+
+  Future<List<Map<String, dynamic>>> services(String vendorId) async {
+    try {
+      final rows =
+          await _api.getList('/api/v1/vendor/me/vendor-services', auth: true);
+      return rows.map(_normalizeService).toList();
+    } on ApiException catch (e) {
+      if (_isMissingModerationColumn(e)) {
+        return _servicesFromProfile(await profile(vendorId));
+      }
+      rethrow;
+    }
+  }
+
+  /// Service categories used to drive the "Service category" dropdown in the
+  /// My Services form (mirrors the vendor web `service-categories` list).
+  Future<List<Map<String, dynamic>>> serviceCategories(String vendorId) async {
+    final rows = await _safeList(() => _api
+        .getList('/api/v1/vendor/me/catalog/service-categories', auth: true));
+    return rows
+        .map((row) => {
+              'id': row.s('id'),
+              'name': row.s('name'),
+              'slug': row.s('slug'),
+            })
+        .where((row) => (row['id'] as String).isNotEmpty)
+        .toList();
+  }
+
+  /// Catalog service templates used to drive the "Subcategory" dropdown and to
+  /// auto-fill defaults when a template is chosen (mirrors the web
+  /// `service-items` list).
+  Future<List<Map<String, dynamic>>> catalogServiceItems(
+      String vendorId) async {
+    final rows = await _safeList(() =>
+        _api.getList('/api/v1/vendor/me/catalog/service-items', auth: true));
+    return rows
+        .map((row) => {
+              ...row,
+              'id': row.s('id'),
+              'service_category_id':
+                  row.s('serviceCategoryId', row.s('service_category_id')),
+              'name': row.s('name'),
+              'description': row.s('description'),
+              'icon_url':
+                  _resolveUrl(_imageFrom(row, const ['iconUrl', 'icon_url'])),
+              'base_price': row.s('basePrice', row.s('base_price')),
+              'availability': row['availability'] ?? true,
+              'trending': row['trending'] ?? false,
+              'metadata': _metadata(row),
+            })
+        .where((row) => (row['id'] as String).isNotEmpty)
+        .toList();
+  }
+
+  Future<void> upsertService(String vendorId, Map<String, dynamic> values,
+      {String? id}) async {
+    final payload = _servicePayload(values, includeServiceId: id == null);
+    if (id == null) {
+      await _api.postJson('/api/v1/vendor/me/vendor-services',
+          body: payload, auth: true);
+    } else {
+      await _api.patchJson('/api/v1/vendor/me/vendor-services/$id',
+          body: payload, auth: true);
+    }
+  }
+
+  /// Minimal active/inactive toggle — matches the web which patches only
+  /// `isActive` so the rest of the listing metadata is untouched.
+  Future<void> setServiceActive(String id, bool active) async {
+    await _api.patchJson('/api/v1/vendor/me/vendor-services/$id',
+        body: {'isActive': active}, auth: true);
+  }
+
+  Future<void> deleteService(String id) async {
+    await _api.deleteJson('/api/v1/vendor/me/vendor-services/$id', auth: true);
+  }
+
+  Future<List<Map<String, dynamic>>> orders(String vendorId) async {
+    final rows = await _safeList(() => _api.getList('/api/v1/vendor/orders',
+        query: {'limit': 500, 'offset': 0}, auth: true));
+    return rows.map(_normalizeOrder).toList();
+  }
+
+  Future<Map<String, dynamic>?> order(String id) async {
+    final data = await _safeMap(
+        () => _api.getJson('/api/v1/vendor/orders/$id', auth: true));
+    return data == null ? null : _normalizeOrder(data);
+  }
+
+  Future<void> updateOrderStatus(String id, String status,
+      [Map<String, dynamic>? shippingData]) async {
+    Map<String, dynamic>? metadata;
+    if (shippingData != null) {
+      final current = await order(id);
+      final existing = current?['metadata'];
+      final base = existing is Map
+          ? Map<String, dynamic>.from(existing)
+          : <String, dynamic>{};
+      // Merge shipping fields — never replace entire metadata (wipes line items).
+      metadata = {...base, ...shippingData};
+    }
+    await _api.patchJson(
+      '/api/v1/vendor/orders/$id',
+      body: {
+        'status': status,
+        if (metadata != null) 'metadata': metadata,
+      },
+      auth: true,
+    );
+  }
+
+  Future<void> updateProductReturn(String id, String action,
+      {String? note}) async {
+    await _api.patchJson('/api/v1/vendor/orders/$id/return',
+        body: {
+          'action': action,
+          if (note != null && note.trim().isNotEmpty) 'note': note.trim()
+        },
+        auth: true);
+  }
+
+  Future<List<Map<String, dynamic>>> bookings(String vendorId) async {
+    final rows = await _safeList(() => _api.getList('/api/v1/vendor/bookings',
+        query: {'limit': 500, 'offset': 0}, auth: true));
+    return rows.map(_normalizeBooking).toList();
+  }
+
+  Future<Map<String, dynamic>?> booking(String id) async {
+    final data = await _safeMap(
+        () => _api.getJson('/api/v1/vendor/bookings/$id', auth: true));
+    return data == null ? null : _normalizeBooking(data);
+  }
+
+  Future<void> updateBookingStatus(String id, String status) async {
+    await _api.patchJson('/api/v1/vendor/bookings/$id',
+        body: {'status': status}, auth: true);
+  }
+
+  Future<void> completeBooking(String id, File photo, String notes) async {
+    final uploaded = await uploadVendorAsset('', photo, 'service-completions',
+        photo.path.split(RegExp(r'[\\/]')).last, 'image/jpeg');
+    await _api.postJson(
+      '/api/v1/vendor/bookings/$id/completion-proof',
+      body: {
+        'photoUrls': [uploaded],
+        'notes': notes
+      },
+      auth: true,
+    );
+  }
+
+  Future<void> verifyBookingCompletionOtp(String id, String otp) async {
+    await _api.postJson('/api/v1/vendor/bookings/$id/completion-otp',
+        body: {'otp': otp}, auth: true);
+  }
+
+  Future<List<Map<String, dynamic>>> settlements(String vendorId) async {
+    final rows = await _safeList(() => _api.getList(
+        '/api/v1/vendor/me/settlements',
+        query: {'limit': 500, 'offset': 0},
+        auth: true));
+    // Settlement values must always come from persisted backend records. Never
+    // manufacture payout rows from completed bookings on the client.
+    return rows.map(_normalizeSettlement).toList();
+  }
+
+  Future<Map<String, dynamic>?> settlement(String id) async {
+    final data = await _safeMap(
+        () => _api.getJson('/api/v1/vendor/me/settlements/$id', auth: true));
+    return data == null ? null : _normalizeSettlement(data);
+  }
+
+  Future<SettlementStats> settlementStats(String vendorId) async {
+    final rows = await settlements(vendorId);
+    double sumWhere(bool Function(Map<String, dynamic>) test) => rows
+        .where(test)
+        .fold(0, (sum, row) => sum + moneyOf(row, 'net_amount'));
+    return SettlementStats(
+      totalEarned: sumWhere((r) => [
+            'pending',
+            'eligible',
+            'created',
+            'processing',
+            'queued',
+            'settled',
+            'completed',
+            'paid'
+          ].contains(r['status']?.toString().toLowerCase())),
+      pending: sumWhere((r) => [
+            'pending',
+            'eligible',
+            'created',
+            'processing',
+            'queued'
+          ].contains(r['status']?.toString().toLowerCase())),
+      settled: sumWhere((r) => ['settled', 'completed', 'paid']
+          .contains(r['status']?.toString().toLowerCase())),
+      rejected: sumWhere((r) => ['rejected', 'failed', 'cancelled', 'on_hold']
+          .contains(r['status']?.toString().toLowerCase())),
+    );
+  }
+
+  Future<Map<String, dynamic>> ratingSummary(String vendorId) async {
+    final data = await _safeMap(
+        () => _api.getJson('/api/v1/vendor/me/rating-summary', auth: true));
+    if (data == null) return {};
+    return {
+      'rating': data.n('averageRating', data.n('rating')),
+      'review_count': data.i('reviewCount', data.i('totalReviews')),
+      'total_orders': data.i('totalOrders'),
+    };
+  }
+
+  Future<Map<String, dynamic>> planInfo(String vendorId) async {
+    return await _safeMap(
+            () => _api.getJson('/api/v1/vendor/me/plan', auth: true)) ??
+        {};
+  }
+
+  Future<List<Map<String, dynamic>>> plans(String vendorId) async {
+    return _safeList(() => _api.getList('/api/v1/vendor/me/plans', auth: true));
+  }
+
+  Future<Map<String, dynamic>> startPlanCheckout(String planId) =>
+      _api.postJson('/api/v1/vendor/me/plan/checkout',
+          body: {'planId': planId}, auth: true);
+
+  Future<Map<String, dynamic>> verifyPlanPayment({
+    required String planId,
+    required String orderId,
+    required String paymentId,
+    required String signature,
+  }) =>
+      _api.postJson('/api/v1/vendor/me/plan/verify',
+          body: {
+            'planId': planId,
+            'razorpay_order_id': orderId,
+            'razorpay_payment_id': paymentId,
+            'razorpay_signature': signature,
+          },
+          auth: true);
+
+  Future<Map<String, dynamic>> dropshippingSettings() =>
+      _api.getJson('/api/v1/vendor/me/dropshipping/settings', auth: true);
+
+  Future<Map<String, dynamic>> saveDropshippingSettings(
+          Map<String, dynamic> values) =>
+      _api.putJson('/api/v1/vendor/me/dropshipping/settings',
+          body: values, auth: true);
+
+  Future<List<Map<String, dynamic>>> dropshippingSuppliers() =>
+      _api.getList('/api/v1/vendor/me/dropshipping/suppliers', auth: true);
+
+  Future<List<Map<String, dynamic>>> dropshippingOrders() =>
+      _api.getList('/api/v1/vendor/me/dropshipping/orders',
+          query: {'limit': 500, 'offset': 0}, auth: true);
+
+  Future<Map<String, dynamic>> createDropshippingOrder(String orderId) =>
+      _api.postJson(
+          '/api/v1/vendor/me/dropshipping/orders/from-commerce/$orderId',
+          body: const {},
+          auth: true);
+
+  Future<Map<String, dynamic>> forwardDropshippingOrder(String id) =>
+      _api.postJson('/api/v1/vendor/me/dropshipping/orders/$id/forward',
+          body: const {}, auth: true);
+
+  Future<Map<String, dynamic>> cancelDropshippingOrder(String id) =>
+      _api.patchJson('/api/v1/vendor/me/dropshipping/orders/$id/status',
+          body: const {'status': 'cancelled'}, auth: true);
+  Future<Map<String, dynamic>> profile(String vendorId) async {
+    final data =
+        await _safeMap(() => _api.getJson('/api/v1/vendor/me', auth: true));
+    final source = apiObject(
+            data?['vendor'] ?? data?['profile'] ?? data?['data'] ?? data) ??
+        {};
+    final normalized = _normalizeVendor(source);
+    if (normalized.isNotEmpty) await apiSession.saveProfile(normalized);
+    return normalized;
+  }
+
+  Future<void> updateProfile(
+      String vendorId, Map<String, dynamic> values) async {
+    await _api.patchJson('/api/v1/vendor/me',
+        body: await _vendorPatchBody(values), auth: true);
+  }
+
+  Future<String> uploadVendorAsset(String vendorId, File file, String folder,
+      String fileName, String contentType) async {
+    final path = contentType == 'application/pdf'
+        ? '/api/v1/vendor/me/documents/upload'
+        : '/api/v1/vendor/me/upload';
+    final data = await _api.uploadFile(path, file,
+        fields: {'folder': folder}, contentType: contentType, auth: true);
+    return _uploadedUrl(data);
+  }
+
+  Future<List<Map<String, dynamic>>> bankAccounts(String vendorId) async {
+    final vendor = await profile(vendorId);
+    final bank = vendor['bankJson'] ?? vendor['bank_json'] ?? vendor['bank'];
+    return parseBankAccounts(bank).map(bankAccountToUiRow).toList();
+  }
+
+  Future<void> addBankAccount(
+      String vendorId, Map<String, dynamic> values, bool primary) async {
+    final vendor = await profile(vendorId);
+    final bank = vendor['bankJson'] ?? vendor['bank_json'] ?? vendor['bank'];
+    final existing = parseBankAccounts(bank);
+    final row = bankAccountFromForm(
+      values,
+      id: newBankAccountId(),
+      isPrimary: existing.isEmpty || primary,
+    );
+    final next = [...existing, row];
+    await updateProfile(vendorId, {'bankJson': serializeBankAccounts(next)});
+  }
+
+  Future<void> setPrimaryBank(String vendorId, String id) async {
+    final vendor = await profile(vendorId);
+    final bank = vendor['bankJson'] ?? vendor['bank_json'] ?? vendor['bank'];
+    final existing = parseBankAccounts(bank);
+    if (existing.isEmpty) return;
+    final next = [
+      for (final a in existing) {...a, 'isPrimary': a['id'] == id},
+    ];
+    await updateProfile(vendorId, {'bankJson': serializeBankAccounts(next)});
+  }
+
+  Future<void> deleteBank(String vendorId, String id) async {
+    final vendor = await profile(vendorId);
+    final bank = vendor['bankJson'] ?? vendor['bank_json'] ?? vendor['bank'];
+    final next = parseBankAccounts(bank).where((a) => a['id'] != id).toList();
+    await updateProfile(vendorId, {'bankJson': serializeBankAccounts(next)});
+  }
+
+  Future<List<Map<String, dynamic>>> availability(String vendorId) async {
+    final data = await _safeMap(() =>
+        _api.getJson('/api/v1/vendor/me/booking-availability', auth: true));
+    // Web unwraps `{ availability: DTO }` — without this the schedule is blank
+    // and saving rebuilds weekly from empty → wipe.
+    final raw = data == null
+        ? null
+        : (data['availability'] is Map
+            ? Map<String, dynamic>.from(data['availability'] as Map)
+            : Map<String, dynamic>.from(data));
+    _availabilityDto = raw;
+    final weekly = raw?['weekly'];
+    final rows = <Map<String, dynamic>>[];
+    if (weekly is Map) {
+      weekly.forEach((key, value) {
+        final slot = value is Map
+            ? Map<String, dynamic>.from(value)
+            : <String, dynamic>{};
+        final start = _hhmm(slot['start']?.toString() ?? '09:00');
+        final end = _hhmm(slot['end']?.toString() ?? '18:00');
+        // Primary window + any extra custom windows become the editor's slots.
+        final slots = <Map<String, dynamic>>[
+          {'start': start, 'end': end}
+        ];
+        final custom = slot['customSlots'];
+        if (custom is List) {
+          for (final entry in custom) {
+            if (entry is Map) {
+              slots.add({
+                'start': _hhmm(entry['start']?.toString() ?? start),
+                'end': _hhmm(entry['end']?.toString() ?? end),
+              });
+            }
+          }
+        }
+        rows.add({
+          'id': 'day-$key',
+          'day_of_week': int.tryParse(key.toString()) ?? 0,
+          'is_available': slot['enabled'] ?? false,
+          'buffer_minutes': slot['bufferMinutes'] ?? 30,
+          'time_slots': slots,
+        });
+      });
+      rows.sort((a, b) =>
+          (a['day_of_week'] as int).compareTo(b['day_of_week'] as int));
+    }
+    return rows;
+  }
+
+  Future<void> saveAvailability(
+      String vendorId, List<Map<String, dynamic>> rows) async {
+    final dto = _availabilityDto ?? const {};
+    final existingWeekly = dto['weekly'] is Map
+        ? Map<String, dynamic>.from(dto['weekly'] as Map)
+        : <String, dynamic>{};
+    final weekly = <String, Map<String, dynamic>>{};
+    for (final row in rows) {
+      final key = row.s('day_of_week');
+      final prev = existingWeekly[key] is Map
+          ? Map<String, dynamic>.from(existingWeekly[key] as Map)
+          : <String, dynamic>{};
+      final rawSlots =
+          row['time_slots'] is List ? row['time_slots'] as List : const [];
+      final normalized = rawSlots
+          .whereType<Map>()
+          .map((s) => {
+                'start': _hhmm(s['start']?.toString() ?? '09:00'),
+                'end': _hhmm(s['end']?.toString() ?? '18:00'),
+              })
+          .toList();
+      final primary = normalized.isNotEmpty
+          ? normalized.first
+          : {'start': '09:00', 'end': '18:00'};
+      final custom = normalized.length > 1 ? normalized.sublist(1) : const [];
+      weekly[key] = {
+        ...prev, // preserve any server fields the editor doesn't touch
+        'enabled': row['is_available'] == true,
+        'start': primary['start'],
+        'end': primary['end'],
+        'bufferMinutes': row['buffer_minutes'] ?? prev['bufferMinutes'] ?? 30,
+        'customSlots': custom,
+      };
+    }
+    await _api.putJson(
+      '/api/v1/vendor/me/booking-availability',
+      body: {
+        'version': dto['version'] ?? 1,
+        'todayClosed': dto['todayClosed'] ?? false,
+        'defaultSlotMinutes': dto['defaultSlotMinutes'] ?? 60,
+        'weekly': weekly,
+        'dateOffs': dto['dateOffs'] is List ? dto['dateOffs'] : const [],
+      },
+      auth: true,
+    );
+  }
+
+  /// Normalises a time string to 24h `HH:MM` (accepts `9:00 AM`, `09:00`, etc.).
+  String _hhmm(String value) {
+    final v = value.trim();
+    final ampm = RegExp(r'^(\d{1,2}):(\d{2})\s*([AaPp][Mm])$').firstMatch(v);
+    if (ampm != null) {
+      var h = int.parse(ampm.group(1)!);
+      final m = ampm.group(2)!;
+      final pm = ampm.group(3)!.toLowerCase() == 'pm';
+      if (pm && h != 12) h += 12;
+      if (!pm && h == 12) h = 0;
+      return '${h.toString().padLeft(2, '0')}:$m';
+    }
+    final hm = RegExp(r'^(\d{1,2}):(\d{2})').firstMatch(v);
+    if (hm != null) {
+      return '${hm.group(1)!.padLeft(2, '0')}:${hm.group(2)}';
+    }
+    return v.isEmpty ? '09:00' : v;
+  }
+
+  Future<List<Map<String, dynamic>>> mediaFolders(String vendorId) async {
+    final rows = await _safeList(
+        () => _api.getList('/api/v1/vendor/me/media/folders', auth: true));
+    return rows
+        .map((row) => {
+              ...row,
+              'id': row.s('id', row.s('folderId')),
+              'name': row.s('name'),
+            })
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> createMediaFolder(
+      String vendorId, String name) async {
+    return _api.postJson('/api/v1/vendor/me/media/folders',
+        body: {'name': name}, auth: true);
+  }
+
+  Future<void> deleteMediaFolder(String folderId) async {
+    if (folderId.isEmpty) return;
+    await _api.deleteJson('/api/v1/vendor/me/media/folders/$folderId',
+        auth: true);
+  }
+
+  Future<List<Map<String, dynamic>>> media(String vendorId,
+      {String type = 'all', String search = ''}) async {
+    final filter = (type == 'images' || type == 'documents') ? type : 'all';
+    final rows = await _safeList(
+      () => _api.getList(
+        '/api/v1/vendor/me/media/assets',
+        query: {
+          'q': search.isEmpty ? null : search,
+          'type': filter,
+          'limit': 500,
+          'offset': 0
+        },
+        auth: true,
+      ),
+    );
+    return rows.map(_normalizeMedia).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> notifications(String vendorId) async {
+    final rows = await _safeList(
+        () => _api.getList('/api/v1/notifications/me', auth: true));
+    return rows.map(_normalizeNotification).toList();
+  }
+
+  Future<void> markNotificationRead(String id) async {
+    if (id.isEmpty) return;
+    await _api.postJson('/api/v1/notifications/me/$id/read', auth: true);
+  }
+
+  Future<void> uploadMedia(String vendorId, File file, String fileName,
+      String folderId, String contentType) async {
+    await _api.uploadFile(
+      '/api/v1/vendor/me/media/folders/$folderId/upload',
+      file,
+      contentType: contentType,
+      auth: true,
+    );
+  }
+
+  Future<void> deleteMedia(Map<String, dynamic> item) async {
+    final id = item.s('id');
+    if (id.isNotEmpty) {
+      await _api.deleteJson('/api/v1/vendor/me/media/assets/$id', auth: true);
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> supportTickets() =>
+      _api.getList('/api/v1/vendor/support/tickets', auth: true);
+
+  Future<Map<String, dynamic>> supportTicket(String id) =>
+      _api.getJson('/api/v1/vendor/support/tickets/$id', auth: true);
+
+  Future<Map<String, dynamic>> sendSupportMessage(String id, String message) =>
+      _api.postJson('/api/v1/vendor/support/tickets/$id/messages',
+          body: {'message': message}, auth: true);
+
+  Future<Map<String, dynamic>> closeSupportTicket(String id) =>
+      _api.patchJson('/api/v1/vendor/support/tickets/$id/close',
+          body: const {}, auth: true);
+
+  Future<void> createSupportTicket({
+    required String vendorId,
+    required String vendorName,
+    required String subject,
+    required String description,
+    required String category,
+    required String priority,
+  }) async {
+    await _api.postJson('/api/v1/vendor/support/tickets',
+        body: {
+          'subject': subject,
+          'message': description,
+          'category': category,
+          'priority': priority,
+          'metadata': {'vendorName': vendorName}
+        },
+        auth: true);
+  }
+
+  Future<void> deactivateVendor(String vendorId, String reason) async {
+    await updateProfile(vendorId, {
+      'notes': jsonEncode({
+        'accountControl': 'deactivate',
+        'reason': reason.isEmpty ? null : reason,
+        'requestedAt': DateTime.now().toIso8601String(),
+      }),
+    });
+  }
+
+  Future<void> softDeleteVendor(String vendorId, String reason) async {
+    await updateProfile(vendorId, {
+      'notes': jsonEncode({
+        'accountControl': 'delete',
+        'reason': reason.isEmpty ? null : reason,
+        'requestedAt': DateTime.now().toIso8601String(),
+      }),
+    });
+  }
+
+  Map<String, dynamic> _vendorRegistrationPayload(Map<String, dynamic> form) {
+    final requestedKind = form.s('category', 'product').toLowerCase();
+    final category =
+        const {'product', 'service', 'both'}.contains(requestedKind)
+            ? requestedKind
+            : 'product';
+    final productCategory = form.s('product_category').trim();
+    final serviceName = form.s('service_name').trim();
+    final shopAddress = form.s('shop_address').trim();
+    final state = form.s('state').trim();
+    final district = form.s('district').trim();
+    final phone = _phone(form.s('phone')).trim();
+    final secondaryPhone = _phone(form.s('secondary_phone')).trim();
+    return {
+      'vendorKind': category,
+      'vendorType': category.toUpperCase(),
+      'ownerName': form.s('name'),
+      'businessName': form.s('business_name'),
+      'businessType': _nullIfEmpty(form.s('business_type')),
+      'email': form.s('email').isEmpty ? null : form.s('email'),
+      'phone': phone.isEmpty ? null : phone,
+      'secondaryPhone': secondaryPhone.isEmpty ? null : secondaryPhone,
+      'gst': form.s('gst_number').isEmpty ? null : form.s('gst_number'),
+      'pan': form.s('pan_number').isEmpty ? null : form.s('pan_number'),
+      'categoriesJson': category != 'service' && productCategory.isNotEmpty
+          ? [productCategory]
+          : null,
+      'servicesJson': category != 'product' && serviceName.isNotEmpty
+          ? [serviceName]
+          : null,
+      'addressJson': {
+        'state': state.isEmpty ? null : state,
+        'stateName': state.isEmpty ? null : state,
+        'district': district.isEmpty ? null : district,
+        'areaLocality': shopAddress.isEmpty ? null : shopAddress,
+        'address': shopAddress.isEmpty ? null : shopAddress,
+      },
+      'documentsJson': {
+        'aadhaarNumber': _nullIfEmpty(form.s('aadhaar_number')),
+        'aadhaarFrontFileName': _nullIfEmpty(form.s('aadhaar_front_url')),
+        'aadhaarBackFileName': _nullIfEmpty(form.s('aadhaar_back_url')),
+        'gstCertificateFileName': form.s('gst_certificate_url').isEmpty
+            ? null
+            : form.s('gst_certificate_url'),
+        'panCardFileName':
+            form.s('pan_image_url').isEmpty ? null : form.s('pan_image_url'),
+      },
+      'bankJson': _bankPayload(form),
+    };
+  }
+
+  Map<String, dynamic> _productPayload(Map<String, dynamic> values) {
+    final price = values.n('price');
+    final discount = values.n('discount');
+    final finalPrice = price - discount;
+    final stock = values.i('stock', values.i('quantity'));
+    final existingMeta = values['metadata'] is Map
+        ? Map<String, dynamic>.from(values['metadata'] as Map)
+        : <String, dynamic>{};
+    final categoryId = values.s(
+      'subcategory_id',
+      values.s(
+        'subcategoryId',
+        values.s('category_id', values.s('categoryId')),
+      ),
+    );
+    final thumbnail = values.s(
+      'thumbnail_image',
+      values.s('thumbnailUrl', values.s('image')),
+    );
+    final banner = values.s('banner_image', values.s('bannerUrl'));
+    return {
+      'name': values.s('title', values.s('name')).trim(),
+      'categoryId': _nullIfEmpty(categoryId),
+      if (values
+          .s('taxConfigurationId', values.s('tax_configuration_id'))
+          .isNotEmpty)
+        'taxConfigurationId':
+            values.s('taxConfigurationId', values.s('tax_configuration_id')),
+      'sellPrice': price.toStringAsFixed(2),
+      'discountAmount': discount.toStringAsFixed(2),
+      'finalPrice': (finalPrice < 0 ? 0 : finalPrice).toStringAsFixed(2),
+      'shortDescription': _nullIfEmpty(
+          values.s('short_description', values.s('shortDescription'))),
+      'longDescription': _nullIfEmpty(
+          values.s('long_description', values.s('longDescription'))),
+      'thumbnailUrl': _nullIfEmpty(thumbnail),
+      'bannerUrls': banner.isEmpty ? <String>[] : <String>[banner],
+      'description':
+          _nullIfEmpty(values.s('description', values.s('long_description'))),
+      'price': price.toStringAsFixed(2),
+      'isActive': values.s('status', 'active') == 'active',
+      'metadata': {
+        ...existingMeta,
+        'sku': values.s('sku', existingMeta.s('sku')),
+        'productType': values.s(
+          'product_type',
+          values.s('productType', existingMeta.s('productType', 'simple')),
+        ),
+        'quantity': stock,
+        'stock': stock,
+        'taxAmount': values.s('tax', existingMeta.s('taxAmount')),
+        'youtubeVideoUrl': _nullIfEmpty(values.s('youtube_video_url')),
+        'parentItemId': _nullIfEmpty(values.s('parent_item_id')),
+        'subcategoryId': _nullIfEmpty(values.s('subcategory_id')),
+      },
+      if (values['variations'] is List) 'variations': values['variations'],
+    };
+  }
+
+  /// Builds the request body for create/patch of a vendor service offering,
+  /// matching the vendor web contract (CreateVendorServiceOfferingDto). The
+  /// base price drives both `price` and `basePrice`. `serviceId` (the catalog
+  /// template id) is only sent on create — it cannot change on edit.
+  Map<String, dynamic> _servicePayload(Map<String, dynamic> values,
+      {required bool includeServiceId}) {
+    final base = values.s('base_price', values.s('price')).trim();
+    final priceType = values.s('price_type', 'fixed').trim();
+    return {
+      if (includeServiceId)
+        'serviceId': values.s('service_id', values.s('serviceId')),
+      'price': base,
+      'isAvailable': values['availability'] ?? true,
+      'displayName': _nullIfEmpty(values.s('title', values.s('displayName'))),
+      'description': _nullIfEmpty(values.s('description')),
+      'iconUrl': _nullIfEmpty(values.s('image', values.s('iconUrl'))),
+      'trending': values['trending'] == true,
+      'emergency': values['emergency'] == true,
+      'basePrice': _nullIfEmpty(base),
+      'priceType':
+          const ['fixed', 'starting_from', 'hourly'].contains(priceType)
+              ? priceType
+              : 'fixed',
+      'duration': _nullIfEmpty(values.s('duration')),
+      'city': _nullIfEmpty(values.s('city')),
+      // On edit the vendor may activate/deactivate from the form; the backend
+      // ignores this while the listing is pending approval.
+      if (!includeServiceId && values['is_active'] != null)
+        'isActive': values['is_active'] == true,
+    };
+  }
+
+  /// Builds a `PATCH /me` body that writes to the SAME fields the vendor web
+  /// uses: shop address → `addressJson.areaLocality` (merged over the existing
+  /// addressJson so state/district survive), cover → `bannerUrl`, logo →
+  /// `logoUrl`. It no longer dumps the whole form into `metadata`.
+  Future<Map<String, dynamic>> _vendorPatchBody(
+      Map<String, dynamic> values) async {
+    final body = <String, dynamic>{};
+    if (values['business_name'] != null || values['businessName'] != null) {
+      body['businessName'] = values['business_name'] ?? values['businessName'];
+    }
+    if (values['name'] != null || values['ownerName'] != null) {
+      body['ownerName'] = values['name'] ?? values['ownerName'];
+    }
+    if (values['email'] != null) body['email'] = values['email'];
+    if (values['mobile'] != null || values['phone'] != null) {
+      body['phone'] = values['mobile'] ?? values['phone'];
+    }
+    if (values['bankJson'] != null) body['bankJson'] = values['bankJson'];
+    if (values['documentsJson'] != null) {
+      body['documentsJson'] = values['documentsJson'];
+    }
+    if (values['status'] != null) body['status'] = values['status'];
+    if (values['notes'] != null) body['notes'] = values['notes'];
+
+    final banner = values['background_image'] ??
+        values['bannerUrl'] ??
+        values['banner_url'];
+    if (banner != null) body['bannerUrl'] = banner;
+    final logo =
+        values['logo'] ?? values['logoUrl'] ?? values['store_logo_url'];
+    if (logo != null) body['logoUrl'] = logo;
+
+    final touchesAddress = values['shop_address'] != null ||
+        values['latitude'] != null ||
+        values['longitude'] != null ||
+        values['addressJson'] is Map;
+    if (touchesAddress) {
+      final cached = await apiSession.cachedProfile() ?? const {};
+      final existing = cached['addressJson'] ?? cached['address_json'];
+      final addr = existing is Map
+          ? Map<String, dynamic>.from(existing)
+          : <String, dynamic>{};
+      if (values['addressJson'] is Map) {
+        addr.addAll(Map<String, dynamic>.from(values['addressJson'] as Map));
+      }
+      if (values['shop_address'] != null) {
+        addr['areaLocality'] = values['shop_address'];
+        addr['address'] = values['shop_address'];
+      }
+      if (values['latitude'] != null) addr['latitude'] = values['latitude'];
+      if (values['longitude'] != null) addr['longitude'] = values['longitude'];
+      body['addressJson'] = addr;
+    }
+
+    // Only forward metadata the caller explicitly set — don't pollute it.
+    if (values['metadata'] is Map) body['metadata'] = values['metadata'];
+    return body;
+  }
+
+  /// Registration / onboarding: persist a single primary account in the
+  /// versioned `{ version: 1, accounts: [...] }` shape used by the bank page.
+  Map<String, dynamic> _bankPayload(Map<String, dynamic> values) {
+    final row =
+        bankAccountFromForm(values, id: newBankAccountId(), isPrimary: true);
+    final hasAny = (row['bankName'] as String).isNotEmpty ||
+        (row['accountHolderName'] as String).isNotEmpty ||
+        (row['accountNumber'] as String).isNotEmpty ||
+        (row['ifscCode'] as String).isNotEmpty;
+    if (!hasAny) {
+      return serializeBankAccounts(const []);
+    }
+    return serializeBankAccounts([row]);
+  }
+
+  Map<String, dynamic> _normalizeVendor(Map<String, dynamic> row) {
+    final vendorType = _vendorType(row);
+    final addressJson = row['addressJson'] ?? row['address_json'];
+    final area = addressJson is Map
+        ? (addressJson['areaLocality'] ?? addressJson['address'] ?? '')
+            .toString()
+        : '';
+    return {
+      ...row,
+      'id': row.s('id', row.s('vendorId')),
+      'name': row.s('name', row.s('ownerName')),
+      'business_name':
+          row.s('business_name', row.s('businessName', row.s('storeName'))),
+      'mobile': row.s('mobile', row.s('phone')),
+      'shop_address':
+          row.s('shop_address').isNotEmpty ? row.s('shop_address') : area,
+      'vendorType': vendorType,
+      'vendor_type': vendorType,
+      'vendorKind': vendorType,
+      'vendor_kind': vendorType,
+      'background_image': _resolveUrl(_imageFrom(row, const [
+        'background_image',
+        'backgroundImage',
+        'bannerUrl',
+        'banner_url',
+        'coverImage',
+        'thumbnailUrl'
+      ])),
+      'logo': _resolveUrl(_imageFrom(
+          row, const ['logo', 'logoUrl', 'thumbnailUrl', 'thumbnail_url'])),
+    };
+  }
+
+  Map<String, dynamic> _normalizeProduct(Map<String, dynamic> row) {
+    final moderation = row
+        .s('moderationStatus', row.s('moderation_status', 'approved'))
+        .toLowerCase();
+    final status = moderation == 'pending' || moderation == 'pending_approval'
+        ? 'pending_approval'
+        : row.s('status', row['isActive'] == false ? 'inactive' : 'active');
+    final meta = _metadata(row);
+    return {
+      ...row,
+      'id': row.s('id', row.s('productId')),
+      'title': row.s('title', row.s('name')),
+      'price': row.n('price', row.n('sellPrice', row.n('finalPrice'))),
+      'discount': row.n('discount', row.n('discountAmount')),
+      'tax': row.n('tax', meta.n('taxAmount')),
+      'stock': row.i(
+        'stock',
+        row.i('availableStock', meta.i('quantity', meta.i('stock'))),
+      ),
+      'category_id': row.s('categoryId', row.s('category_id')),
+      'subcategory_id': meta.s('subcategoryId'),
+      'parent_item_id': meta.s('parentItemId'),
+      'sku': row.s('sku', meta.s('sku')),
+      'short_description':
+          row.s('shortDescription', row.s('short_description')),
+      'long_description': row.s(
+        'longDescription',
+        row.s('long_description', row.s('description')),
+      ),
+      'thumbnail_image': row.s('thumbnailUrl', row.s('thumbnail_url')),
+      'banner_image': _imageFrom(row, const ['bannerUrls', 'banner_urls']),
+      'youtube_video_url': meta.s('youtubeVideoUrl'),
+      'image': _resolveUrl(_imageFrom(row, const [
+        'image',
+        'imageUrl',
+        'image_url',
+        'thumbnailUrl',
+        'thumbnail_url',
+        'primaryImageUrl',
+        'primary_image_url',
+        'images',
+        'imageUrls',
+        'mediaUrls'
+      ])),
+      'status': status,
+      'moderation_status': moderation,
+      'product_type': meta.s('productType', 'simple'),
+      'variations': row['variations'] is List ? row['variations'] : const [],
+    };
+  }
+
+  Map<String, dynamic> _normalizeService(Map<String, dynamic> row) {
+    final metadata = _metadata(row);
+    final catalogMeta =
+        _asMap(row['catalogMetadata'] ?? row['catalog_metadata']);
+    // Web display rule: metadata.displayName || catalogName. Guard against raw
+    // UUIDs sneaking through so the list never shows a service id as a name.
+    final metaDisplay = _metaStr(metadata, 'displayName');
+    final catalogName = row.s('catalogName', row.s('catalog_name'));
+    final title = _readable(metaDisplay).isNotEmpty
+        ? metaDisplay
+        : _readable(catalogName).isNotEmpty
+            ? catalogName
+            : 'Service';
+    final moderation = row
+        .s('moderationStatus', row.s('moderation_status', 'approved'))
+        .toLowerCase();
+    final priceStr = row.s('price', row.s('basePrice', row.s('base_price')));
+    final iconRaw = _metaStr(metadata, 'vendorIconUrl').isNotEmpty
+        ? _metaStr(metadata, 'vendorIconUrl')
+        : row.s('catalogIconUrl', row.s('catalog_icon_url'));
+    return {
+      ...row,
+      'id': row.s('id', row.s('linkId')),
+      'service_id': row.s('serviceId', row.s('service_id')),
+      'category_id': row.s('categoryId', row.s('category_id')),
+      'category_name': row.s('categoryName', row.s('category_name')),
+      'catalog_name': catalogName,
+      'title': title,
+      'description': _firstNonEmpty([
+        metadata['vendorDescription'],
+        row['catalogDescription'],
+        row['catalog_description'],
+      ]),
+      'price': row.n('price', row.n('basePrice', row.n('base_price'))),
+      'base_price': _firstNonEmpty([metadata['referenceBasePrice'], priceStr]),
+      'price_type': _metaStr(metadata, 'priceType', 'fixed'),
+      'duration':
+          _firstNonEmpty([metadata['duration'], catalogMeta['duration']]),
+      'city': _metaStr(metadata, 'city'),
+      'trending': metadata['trending'] == true,
+      'emergency': metadata['emergency'] == true,
+      'availability': row['isAvailable'] ?? row['availability'] ?? true,
+      'is_active': row['isActive'] ?? true,
+      'image': _resolveUrl(iconRaw),
+      'moderationStatus': moderation,
+      'status': moderation == 'pending'
+          ? 'pending_approval'
+          : (row['isActive'] == false ? 'inactive' : 'active'),
+    };
+  }
+
+  Map<String, dynamic> _normalizeOrder(Map<String, dynamic> row) {
+    final metadata = _metadata(row);
+    final lines = _lineItems(row, metadata).map(_normalizeOrderLine).toList();
+    final customer = _customerName(row, metadata);
+    final displayRef = _displayOrderRef(row, metadata);
+    final title = _orderTitle(row, metadata, lines, customer, displayRef);
+    final paymentMode = _firstNonEmpty([
+      row['paymentMode'],
+      row['payment_mode'],
+      metadata['paymentMode'],
+      metadata['payment_mode'],
+    ]);
+    final paymentStatus = _firstNonEmpty([
+      row['paymentStatus'],
+      row['payment_status'],
+      metadata['paymentStatus'],
+      metadata['payment_status'],
+    ]);
+    final customerPhone = _firstNonEmpty([
+      row['customerPhone'],
+      row['customer_phone'],
+      metadata['customerPhone'],
+      metadata['customer_phone'],
+      metadata['shippingAddress'] is Map
+          ? (metadata['shippingAddress'] as Map)['phone']
+          : null,
+      metadata['shipping_address'] is Map
+          ? (metadata['shipping_address'] as Map)['phone']
+          : null,
+    ]);
+    return {
+      ...row,
+      'id': row.s('id', row.s('orderId')),
+      'order_ref': displayRef,
+      'orderRef': displayRef,
+      'order_title': title,
+      'title': title,
+      'customer_name': customer,
+      'customerName': customer,
+      'customerPhone': customerPhone,
+      'customer_phone': customerPhone,
+      'items': lines,
+      'total': row.n('total', row.n('totalAmount', row.n('grandTotal'))),
+      'created_at': row.s('created_at', row.s('createdAt')),
+      'payment_status': paymentStatus,
+      'paymentStatus': paymentStatus,
+      'payment_mode': paymentMode,
+      'paymentMode': paymentMode,
+      'metadata': metadata,
+    };
+  }
+
+  Map<String, dynamic> _normalizeBooking(Map<String, dynamic> row) {
+    final metadata = _metadata(row);
+    final customer = _customerName(row, metadata);
+    final serviceName = _firstReadable([
+      metadata['serviceName'],
+      metadata['catalogName'],
+      metadata['displayName'],
+      row['service_name'],
+      row['serviceName'],
+      row['catalogName'],
+      row['displayName'],
+      row['name'],
+      row['title'],
+    ]);
+    final title = serviceName.isNotEmpty ? serviceName : 'Service booking';
+    final serviceImage = _resolveUrl(_firstNonEmpty([
+      metadata['serviceImage'],
+      metadata['service_image'],
+      metadata['imageUrl'],
+      row['serviceImage'],
+      row['service_image'],
+    ]));
+    final proof = metadata['completionProof'] ?? metadata['completion_proof'];
+    String completionPhoto = '';
+    if (proof is Map) {
+      final urls = proof['photoUrls'] ?? proof['photo_urls'] ?? proof['photos'];
+      if (urls is List && urls.isNotEmpty) {
+        completionPhoto = _resolveUrl(urls.first?.toString() ?? '');
+      } else {
+        completionPhoto = _resolveUrl(_firstNonEmpty([
+          proof['photoUrl'],
+          proof['photo_url'],
+          proof['completion_photo_url'],
+        ]));
+      }
+    }
+    if (completionPhoto.isEmpty) {
+      completionPhoto = _resolveUrl(_firstNonEmpty([
+        metadata['completion_photo_url'],
+        metadata['completionPhotoUrl'],
+        row['completion_photo_url'],
+        row['completionPhotoUrl'],
+      ]));
+    }
+    return {
+      ...row,
+      'id': row.s('id', row.s('bookingId')),
+      'booking_date': row.s('booking_date', row.s('bookingDate')),
+      'bookingDate': row.s('bookingDate', row.s('booking_date')),
+      'timeSlot': row.s('timeSlot', _bookingTimeSlot(row)),
+      'start_time': row.s('start_time'),
+      'end_time': row.s('end_time'),
+      'service_name': title,
+      'serviceName': title,
+      'serviceImage': serviceImage,
+      'service_image': serviceImage,
+      'order_title': title,
+      'title': title,
+      'customer_name': customer,
+      'customerName': customer,
+      'total_amount': row.n('total_amount', row.n('totalAmount')),
+      'totalAmount': row.n('totalAmount', row.n('total_amount')),
+      'total': row.n('total', row.n('total_amount', row.n('totalAmount'))),
+      'completion_photo_url': completionPhoto,
+      'completionPhotoUrl': completionPhoto,
+      'metadata': metadata,
+      'services': {
+        'title': title,
+        'price': row.n('total_amount', row.n('totalAmount')),
+        'image': serviceImage,
+        'imageUrl': serviceImage,
+      },
+    };
+  }
+
+  Map<String, dynamic> _normalizeSettlement(Map<String, dynamic> row) {
+    final metadata = _metadata(row);
+    final customer = _customerName(row, metadata);
+    final orderRef = _firstReadable([
+      metadata['orderRef'],
+      metadata['order_ref'],
+      row['orderRef'],
+      row['order_ref'],
+      row['orderNumber'],
+      row['order_number'],
+    ]);
+    final displayRef = _firstReadable([
+      metadata['displayRef'],
+      metadata['settlementCode'],
+      metadata['code'],
+      row['settlementNumber'],
+      row['settlement_number'],
+      row['reference'],
+      row['referenceNumber'],
+    ]);
+    final serviceName = _firstReadable([
+      metadata['serviceName'],
+      metadata['catalogName'],
+      row['service_name'],
+      row['serviceName'],
+    ]);
+    final settlementTitle = displayRef.isNotEmpty
+        ? displayRef
+        : serviceName.isNotEmpty
+            ? '$serviceName settlement'
+            : orderRef.isNotEmpty
+                ? '$orderRef settlement'
+                : customer.isNotEmpty && customer != 'Customer'
+                    ? '$customer settlement'
+                    : _shortCode('STL', row.s('id', row.s('settlementId')));
+    return {
+      ...row,
+      'id': row.s('id', row.s('settlementId')),
+      'settlement_title': settlementTitle,
+      'title': settlementTitle,
+      'order_label': orderRef,
+      'order_ref': orderRef,
+      'customer_name': customer,
+      'customerName': customer,
+      'net_amount': row.n('net_amount', row.n('netAmount', row.n('amount'))),
+      'gross_amount': row.n(
+          'gross_amount',
+          row.n(
+              'grossAmount',
+              metadata.n(
+                  'gross',
+                  metadata.n('vendorSubtotal',
+                      metadata.n('orderTotal', row.n('amount')))))),
+      'platform_fee': row.n(
+          'platform_fee',
+          row.n(
+              'platformFee',
+              row.n('commission',
+                  metadata.n('commission', metadata.n('commissionTotal'))))),
+      'amount': row.n('amount'),
+      'commission': row.n(
+          'commission',
+          row.n(
+              'platform_fee',
+              row.n('platformFee',
+                  metadata.n('commission', metadata.n('commissionTotal'))))),
+      'metadata': metadata,
+    };
+  }
+
+  Map<String, dynamic> _normalizeNotification(Map<String, dynamic> row) => {
+        ...row,
+        'id': row.s('id', row.s('notificationId')),
+        'title': row.s('title'),
+        'body': row.s('body', row.s('message')),
+        'status': row.s('status', row['read'] == true ? 'read' : 'unread'),
+        'created_at': row.s('created_at', row.s('createdAt')),
+      };
+  Map<String, dynamic> _normalizeMedia(Map<String, dynamic> row) {
+    final mime = row.s('mimeType', row.s('mime_type', row.s('fileType')));
+    final type = mime.startsWith('image/')
+        ? 'image'
+        : (mime.contains('pdf') || mime.contains('document')
+            ? 'document'
+            : row.s('file_type', row.s('fileType', row.s('type', 'file'))));
+    return {
+      ...row,
+      'id': row.s('id', row.s('assetId')),
+      'file_name': row.s(
+          'file_name',
+          row.s('fileName',
+              row.s('originalName', row.s('original_name', row.s('name'))))),
+      'file_url': _resolveUrl(_imageFrom(
+          row, const ['file_url', 'fileUrl', 'url', 'path', 'publicUrl'])),
+      'file_type': type,
+      'mime_type': mime,
+      'file_size': row.i('file_size', row.i('fileSize', row.i('sizeBytes'))),
+      'created_at': row.s('created_at', row.s('createdAt')),
+    };
+  }
+
+  Map<String, dynamic> _metadata(Map<String, dynamic> row) {
+    final raw = row['metadata'];
+    if (raw is Map) return Map<String, dynamic>.from(raw);
+    if (raw is String && raw.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) return Map<String, dynamic>.from(decoded);
+      } catch (_) {}
+    }
+    return <String, dynamic>{};
+  }
+
+  List<Map<String, dynamic>> _lineItems(
+      Map<String, dynamic> row, Map<String, dynamic> metadata) {
+    final raw = metadata['items'] ?? metadata['lines'] ?? row['items'];
+    if (raw is! List) return [];
+    return raw
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+  }
+
+  List<Map<String, dynamic>> _servicesFromProfile(Map<String, dynamic> vendor) {
+    final raw =
+        vendor['servicesJson'] ?? vendor['services_json'] ?? vendor['services'];
+    if (raw is! List) return <Map<String, dynamic>>[];
+    return raw.asMap().entries.map((entry) {
+      final value = entry.value;
+      if (value is Map) {
+        return _normalizeService(Map<String, dynamic>.from(value));
+      }
+      final title = value?.toString().trim() ?? '';
+      return {
+        'id': 'assigned-service-${entry.key}',
+        'service_id': title,
+        'title': title.isEmpty ? 'Assigned service' : title,
+        'price': 0,
+        'status': 'active',
+      };
+    }).toList();
+  }
+
+  bool _isMissingModerationColumn(ApiException e) {
+    final text = '${e.message} ${e.details}'.toLowerCase();
+    return text.contains('moderation_status') ||
+        text.contains('catalogvendorservice.moderation_status');
+  }
+
+  String _bookingTimeSlot(Map<String, dynamic> row) {
+    final existing = row.s('timeSlot', row.s('time_slot'));
+    if (existing.isNotEmpty) return existing;
+    final start = row.s('start_time', row.s('startTime'));
+    final end = row.s('end_time', row.s('endTime'));
+    if (start.isEmpty && end.isEmpty) return '';
+    return '$start - $end'.trim();
+  }
+
+  Map<String, dynamic> _normalizeOrderLine(Map<String, dynamic> line) {
+    final meta = _metadata(line);
+    final title = _firstReadable([
+      line['name'],
+      line['productName'],
+      line['product_name'],
+      line['title'],
+      meta['productName'],
+      meta['name'],
+      meta['title'],
+    ]);
+    final quantity = line.n('quantity', line.n('qty', 1));
+    final unitPrice = line.n('unit_price',
+        line.n('unitPrice', meta.n('unitPrice', meta.n('price'))));
+    final lineTotal = line.n('line_total',
+        line.n('lineTotal', meta.n('lineTotal', unitPrice * quantity)));
+    return {
+      ...line,
+      'title': title.isEmpty ? 'Item' : title,
+      'name': title.isEmpty ? 'Item' : title,
+      'productName': title.isEmpty ? 'Item' : title,
+      'qty': quantity,
+      'quantity': quantity,
+      'unit_price': unitPrice,
+      'unitPrice': unitPrice,
+      'line_total': lineTotal,
+      'lineTotal': lineTotal,
+      'image': _resolveUrl(_imageFrom({
+        ...meta,
+        ...line
+      }, const [
+        'thumbnailUrl',
+        'imageUrl',
+        'productImage',
+        'image',
+        'thumbnail'
+      ])),
+    };
+  }
+
+  String _displayOrderRef(
+      Map<String, dynamic> row, Map<String, dynamic> metadata) {
+    final ref = _firstReadable([
+      metadata['displayId'],
+      metadata['orderRef'],
+      metadata['order_ref'],
+      row['orderRef'],
+      row['order_ref'],
+      row['orderNumber'],
+      row['order_number'],
+      row['orderCode'],
+      row['order_code'],
+    ]);
+    return ref.isNotEmpty
+        ? ref
+        : _shortCode('ORD', row.s('id', row.s('orderId')));
+  }
+
+  String _customerName(
+      Map<String, dynamic> row, Map<String, dynamic> metadata) {
+    final customer = metadata['customer'] ?? row['customer'];
+    final nested = customer is Map ? Map<String, dynamic>.from(customer) : null;
+    final name = _firstReadable([
+      metadata['customerName'],
+      metadata['customer_name'],
+      row['customerName'],
+      row['customer_name'],
+      nested?['name'],
+      nested?['fullName'],
+      nested?['full_name'],
+      nested?['mobile'],
+      nested?['phone'],
+    ]);
+    return name.isEmpty ? 'Customer' : name;
+  }
+
+  String _orderTitle(Map<String, dynamic> row, Map<String, dynamic> metadata,
+      List<Map<String, dynamic>> lines, String customer, String displayRef) {
+    final explicit = _firstReadable([
+      row['title'],
+      row['name'],
+      metadata['title'],
+      metadata['displayName'],
+    ]);
+    if (explicit.isNotEmpty) return explicit;
+    if (lines.isNotEmpty) {
+      final first = lines.first.s('title', lines.first.s('name'));
+      if (first.isNotEmpty && first != 'Item') {
+        return lines.length > 1 ? '$first + ${lines.length - 1} more' : first;
+      }
+    }
+    if (customer.isNotEmpty && customer != 'Customer') return '$customer order';
+    return displayRef.isNotEmpty ? displayRef : 'Customer order';
+  }
+
+  String _firstReadable(List<Object?> values) {
+    for (final value in values) {
+      final text = value?.toString().trim() ?? '';
+      if (text.isNotEmpty && !_looksLikeUuid(text)) return text;
+    }
+    return '';
+  }
+
+  /// First non-empty string in [values] (UUIDs allowed — used for descriptions,
+  /// durations and prices where a raw value is still meaningful).
+  String _firstNonEmpty(List<Object?> values) {
+    for (final value in values) {
+      final text = value?.toString().trim() ?? '';
+      if (text.isNotEmpty) return text;
+    }
+    return '';
+  }
+
+  /// Returns [value] when it is a non-UUID, non-empty string, else ''.
+  String _readable(String value) {
+    final text = value.trim();
+    return text.isNotEmpty && !_looksLikeUuid(text) ? text : '';
+  }
+
+  String _metaStr(Map<String, dynamic> metadata, String key,
+      [String fallback = '']) {
+    final value = metadata[key];
+    if (value == null) return fallback;
+    final text = value.toString().trim();
+    return text.isEmpty ? fallback : text;
+  }
+
+  Object? _nullIfEmpty(String value) {
+    final text = value.trim();
+    return text.isEmpty ? null : text;
+  }
+
+  Map<String, dynamic> _asMap(Object? value) {
+    if (value is Map) return Map<String, dynamic>.from(value);
+    if (value is String && value.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(value);
+        if (decoded is Map) return Map<String, dynamic>.from(decoded);
+      } catch (_) {}
+    }
+    return <String, dynamic>{};
+  }
+
+  String _shortCode(String prefix, String id) {
+    final clean = id.replaceAll('-', '').trim();
+    if (clean.length >= 7) {
+      return '$prefix-${clean.substring(0, 3).toUpperCase()}-${clean.substring(clean.length - 4).toUpperCase()}';
+    }
+    return prefix;
+  }
+
+  bool _looksLikeUuid(String value) => RegExp(
+        r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+      ).hasMatch(value.trim());
+  String _vendorType(Map<String, dynamic> row) {
+    final value = (row['vendorType'] ??
+            row['vendor_type'] ??
+            row['vendorKind'] ??
+            row['vendor_kind'] ??
+            row['category'] ??
+            'PRODUCT')
+        .toString()
+        .trim()
+        .toUpperCase();
+    if (value == 'SERVICE' || value == 'BOTH') return value;
+    return 'PRODUCT';
+  }
+
+  String _uploadedUrl(Map<String, dynamic> data) {
+    return _resolveUrl(_imageFrom(
+        data, const ['url', 'fileUrl', 'file_url', 'path', 'publicUrl']));
+  }
+
+  String _resolveUrl(String raw) {
+    final value = raw.trim();
+    if (value.isEmpty ||
+        value.startsWith('http') ||
+        value.startsWith('assets/')) {
+      return value;
+    }
+    final normalized = value.startsWith('/') ? value : '/$value';
+    return '${ApiClient.baseUrl}$normalized';
+  }
+
+  String _imageFrom(Map<String, dynamic> row, List<String> keys) {
+    for (final key in keys) {
+      final found = _firstString(row[key]);
+      if (found.isNotEmpty) return found;
+    }
+    return '';
+  }
+
+  String _firstString(Object? value) {
+    if (value == null) return '';
+    if (value is String) return value.trim();
+    if (value is List) {
+      for (final item in value) {
+        final found = _firstString(item);
+        if (found.isNotEmpty) return found;
+      }
+      return '';
+    }
+    if (value is Map) {
+      final map = Map<String, dynamic>.from(value);
+      for (final key in const [
+        'url',
+        'fileUrl',
+        'file_url',
+        'imageUrl',
+        'image_url',
+        'thumbnailUrl',
+        'path'
+      ]) {
+        final found = _firstString(map[key]);
+        if (found.isNotEmpty) return found;
+      }
+      return '';
+    }
+    return value.toString().trim();
+  }
+
+  String _phone(String value) {
+    final digits = value.replaceAll(RegExp(r'\D'), '');
+    return digits.length == 10 ? '+91$digits' : value;
+  }
+
+  Future<List<Map<String, dynamic>>> _safeList(
+      Future<List<Map<String, dynamic>>> Function() loader) async {
+    try {
+      return await loader();
+    } on ApiException catch (e) {
+      // A genuinely absent optional resource can be displayed as empty. Server,
+      // gateway, parsing and authorization errors must reach the screen.
+      if (e.statusCode == 404) return [];
+      rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>?> _safeMap(
+      Future<Map<String, dynamic>> Function() loader) async {
+    try {
+      return await loader();
+    } on ApiException catch (e) {
+      if (e.statusCode == 404) return null;
+      rethrow;
+    }
+  }
+}
+
+extension _MapRead on Map<String, dynamic> {
+  String s(String key, [String fallback = '']) =>
+      this[key]?.toString() ?? fallback;
+
+  num n(String key, [num fallback = 0]) {
+    final value = this[key];
+    if (value is num) return value;
+    return num.tryParse(value?.toString() ?? '') ?? fallback;
+  }
+
+  int i(String key, [int fallback = 0]) => n(key, fallback).round();
+}

@@ -1,0 +1,272 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/app_card.dart';
+import '../../../../core/widgets/vendor_page_intro.dart';
+import '../../../../core/widgets/vendor_scaffold.dart';
+import '../../data/vendor_providers.dart';
+
+class AvailabilityPage extends ConsumerStatefulWidget {
+  const AvailabilityPage({super.key});
+
+  @override
+  ConsumerState<AvailabilityPage> createState() => _AvailabilityPageState();
+}
+
+class _AvailabilityPageState extends ConsumerState<AvailabilityPage> {
+  static const days = [
+    'Sunday',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday'
+  ];
+  // 24h HH:MM in 30-minute steps — matches the web availability DTO format.
+  static final times = [
+    for (var h = 0; h < 24; h++)
+      for (final m in ['00', '30']) '${h.toString().padLeft(2, '0')}:$m'
+  ];
+
+  late List<Map<String, dynamic>> schedule = _defaults();
+  late Future<void> _loadFuture;
+  bool changed = false;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadFuture = _load();
+  }
+
+  List<Map<String, dynamic>> _defaults() => List.generate(
+      7,
+      (i) => {
+            'day_of_week': i,
+            'is_available': i >= 1 && i <= 6,
+            'time_slots': i >= 1 && i <= 6
+                ? [
+                    {'start': '09:00', 'end': '18:00'}
+                  ]
+                : [],
+          });
+
+  Future<void> _load() async {
+    final vendorId = ref.read(vendorIdProvider);
+    if (vendorId == null) return;
+    final rows =
+        await ref.read(vendorRepositoryProvider).availability(vendorId);
+    if (rows.isNotEmpty) {
+      final defaults = _defaults();
+      for (final row in rows) {
+        final idx = row['day_of_week'] as int;
+        defaults[idx] = {
+          'day_of_week': idx,
+          'is_available': row['is_available'] == true,
+          'time_slots': row['time_slots'] is List ? row['time_slots'] : [],
+        };
+      }
+      schedule = defaults;
+    }
+  }
+
+  void _retryLoad() {
+    setState(() => _loadFuture = _load());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return VendorScaffold(
+      title: 'Availability',
+      actions: [
+        IconButton(
+          onPressed: changed && !_saving ? _save : null,
+          icon: _saving
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white))
+              : const Icon(Icons.save_rounded),
+        ),
+      ],
+      child: FutureBuilder(
+        future: _loadFuture,
+        builder: (_, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.cloud_off_rounded, size: 44),
+                    const SizedBox(height: 12),
+                    Text(snapshot.error.toString(),
+                        textAlign: TextAlign.center),
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      onPressed: _retryLoad,
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: const Text('Retry'),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }
+          return ListView(
+            padding: VendorLayout.pagePadding(context),
+            children: [
+              const VendorPageIntro(
+                icon: Icons.calendar_month_rounded,
+                title: 'Smart availability',
+                subtitle:
+                    'Shape your working week and turn open time into confirmed bookings.',
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                  'Set your weekly schedule. Customers can only book when you are available.',
+                  style: TextStyle(color: AppColors.muted)),
+              const SizedBox(height: 16),
+              ...schedule.map((day) => Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: AppCard(
+                      child: Column(
+                        children: [
+                          Row(
+                            children: [
+                              Switch(
+                                  value: day['is_available'] == true,
+                                  onChanged: (v) =>
+                                      _mutate(() => day['is_available'] = v)),
+                              Expanded(
+                                  child: Text(days[day['day_of_week']],
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.w600))),
+                              if (day['is_available'] == true)
+                                TextButton.icon(
+                                    onPressed: () => _mutate(() =>
+                                        (day['time_slots'] as List).add({
+                                          'start': '09:00',
+                                          'end': '17:00'
+                                        })),
+                                    icon: const Icon(Icons.add_rounded),
+                                    label: const Text('Add Slot')),
+                            ],
+                          ),
+                          if (day['is_available'] == true)
+                            ...(day['time_slots'] as List)
+                                .asMap()
+                                .entries
+                                .map((entry) {
+                              final slot =
+                                  Map<String, dynamic>.from(entry.value);
+                              return Padding(
+                                padding:
+                                    const EdgeInsets.only(left: 48, bottom: 8),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                        child: _TimeDrop(
+                                            value: slot['start'],
+                                            onChanged: (v) => _mutate(() =>
+                                                (day['time_slots']
+                                                        as List)[entry.key]
+                                                    ['start'] = v))),
+                                    const Padding(
+                                        padding:
+                                            EdgeInsets.symmetric(horizontal: 8),
+                                        child: Text('to')),
+                                    Expanded(
+                                        child: _TimeDrop(
+                                            value: slot['end'],
+                                            onChanged: (v) => _mutate(() =>
+                                                (day['time_slots']
+                                                        as List)[entry.key]
+                                                    ['end'] = v))),
+                                    IconButton(
+                                        onPressed: () => _mutate(() =>
+                                            (day['time_slots'] as List)
+                                                .removeAt(entry.key)),
+                                        icon: const Icon(
+                                            Icons.delete_outline_rounded)),
+                                  ],
+                                ),
+                              );
+                            })
+                          else
+                            const Padding(
+                                padding: EdgeInsets.only(left: 48),
+                                child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: Text('Not available',
+                                        style: TextStyle(
+                                            color: AppColors.muted)))),
+                        ],
+                      ),
+                    ),
+                  )),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _mutate(VoidCallback fn) => setState(() {
+        fn();
+        changed = true;
+      });
+
+  Future<void> _save() async {
+    final vendorId = ref.read(vendorIdProvider);
+    if (vendorId == null) return;
+    setState(() => _saving = true);
+    try {
+      await ref
+          .read(vendorRepositoryProvider)
+          .saveAvailability(vendorId, schedule);
+      if (!mounted) return;
+      setState(() => changed = false);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Availability saved')));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(e.toString())));
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+}
+
+class _TimeDrop extends StatelessWidget {
+  const _TimeDrop({required this.value, required this.onChanged});
+  final String value;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final options = [
+      if (!_AvailabilityPageState.times.contains(value)) value,
+      ..._AvailabilityPageState.times,
+    ];
+    return DropdownButtonFormField<String>(
+      initialValue: value,
+      items: options
+          .map((t) => DropdownMenuItem(
+              value: t, child: Text(t, style: const TextStyle(fontSize: 12))))
+          .toList(),
+      onChanged: (v) {
+        if (v != null) onChanged(v);
+      },
+    );
+  }
+}

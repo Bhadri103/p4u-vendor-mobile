@@ -1,0 +1,710 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../../../core/navigation/vendor_deep_links.dart';
+import '../../../../core/services/api_client.dart';
+import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/app_card.dart';
+import '../../../../core/widgets/empty_state.dart';
+import '../../../../core/widgets/metric_card.dart';
+import '../../../../core/widgets/vendor_page_intro.dart';
+import '../../../../core/widgets/vendor_scaffold.dart';
+import '../../../auth/data/auth_repository.dart';
+import '../../data/vendor_providers.dart';
+
+enum SimpleVendorKind {
+  analytics,
+  reviews,
+  support,
+  notifications,
+  settings,
+  wallet,
+  accountControl
+}
+
+class SimpleVendorPage extends ConsumerWidget {
+  const SimpleVendorPage({required this.kind, super.key});
+
+  final SimpleVendorKind kind;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return switch (kind) {
+      SimpleVendorKind.analytics => _AnalyticsPage(),
+      SimpleVendorKind.reviews => _ReviewsPage(),
+      SimpleVendorKind.support => _SupportPage(),
+      SimpleVendorKind.notifications => _NotificationsPage(),
+      SimpleVendorKind.settings => _SettingsPage(),
+      SimpleVendorKind.wallet => _WalletPage(),
+      SimpleVendorKind.accountControl => _AccountControlPage(),
+    };
+  }
+}
+
+class _AnalyticsPage extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final dashboard = ref.watch(dashboardProvider);
+    return VendorScaffold(
+      title: 'Analytics',
+      child: dashboard.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, _) => Center(child: Text('$e')),
+        data: (d) => ListView(
+          padding: VendorLayout.pagePadding(context),
+          children: [
+            const VendorPageIntro(
+              icon: Icons.insights_rounded,
+              title: 'Performance analytics',
+              subtitle:
+                  'Turn live orders, revenue and catalog activity into confident decisions.',
+            ),
+            const SizedBox(height: 16),
+            ResponsiveMetricGrid(
+              children: [
+                MetricCard(
+                    icon: Icons.currency_rupee_rounded,
+                    color: AppColors.mint,
+                    label: 'Revenue',
+                    value: 'Rs.${d.revenue.toStringAsFixed(0)}'),
+                MetricCard(
+                    icon: Icons.shopping_cart_rounded,
+                    color: AppColors.amber,
+                    label: 'Orders',
+                    value: '${d.orders.length}'),
+                MetricCard(
+                    icon: Icons.inventory_2_rounded,
+                    color: AppColors.coral,
+                    label: 'Products',
+                    value: '${d.products.length}'),
+                MetricCard(
+                    icon: Icons.handyman_rounded,
+                    color: AppColors.violet,
+                    label: 'Services',
+                    value: '${d.services.length}'),
+              ],
+            ),
+            const SizedBox(height: 16),
+            const AppCard(
+                child: Text(
+                    'Analytics uses the same live orders/products/services data as the React vendor dashboard. Detailed time-series can be added once backend aggregates are available.')),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ReviewsPage extends ConsumerStatefulWidget {
+  @override
+  ConsumerState<_ReviewsPage> createState() => _ReviewsPageState();
+}
+
+class _ReviewsPageState extends ConsumerState<_ReviewsPage> {
+  late Future<List<Map<String, dynamic>>> _reviewsFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _reviewsFuture = _reviews();
+  }
+
+  void _retry() => setState(() => _reviewsFuture = _reviews());
+
+  @override
+  Widget build(BuildContext context) {
+    return VendorScaffold(
+      title: 'Reviews',
+      child: FutureBuilder<List<Map<String, dynamic>>>(
+        future: _reviewsFuture,
+        builder: (_, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(snapshot.error.toString(), textAlign: TextAlign.center),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: _retry,
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('Retry'),
+                  ),
+                ],
+              ),
+            );
+          }
+          final rows = snapshot.data ?? const <Map<String, dynamic>>[];
+          if (rows.isEmpty) {
+            return ListView(
+              padding: VendorLayout.pagePadding(context),
+              children: const [
+                VendorPageIntro(
+                  icon: Icons.star_rounded,
+                  title: 'Customer reviews',
+                  subtitle:
+                      'Follow customer sentiment and turn every review into better service.',
+                ),
+                SizedBox(height: 16),
+                EmptyState(
+                    icon: Icons.star_outline_rounded, title: 'No reviews yet'),
+              ],
+            );
+          }
+          return ListView(
+            padding: VendorLayout.pagePadding(context),
+            children: [
+              const VendorPageIntro(
+                icon: Icons.star_rounded,
+                title: 'Customer reviews',
+                subtitle:
+                    'Follow customer sentiment and turn every review into better service.',
+              ),
+              const SizedBox(height: 16),
+              ...rows.map((r) => Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: AppCard(
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading:
+                            const Icon(Icons.star_rounded, color: Colors.amber),
+                        title: Text('${r['rating'] ?? 0} / 5'),
+                        subtitle: Text(r['comment']?.toString() ?? ''),
+                      ),
+                    ),
+                  )),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _reviews() async {
+    final vendorId = ref.read(vendorIdProvider);
+    if (vendorId == null) return [];
+    final client = ref.read(vendorRepositoryProvider);
+    final profile = await client.profile(vendorId);
+    return profile['reviews'] is List
+        ? List<Map<String, dynamic>>.from(profile['reviews'])
+        : [];
+  }
+}
+
+class _SupportPage extends ConsumerStatefulWidget {
+  @override
+  ConsumerState<_SupportPage> createState() => _SupportPageState();
+}
+
+class _SupportPageState extends ConsumerState<_SupportPage> {
+  Future<void> _openTicket(Map<String, dynamic> ticket) async {
+    var detail = await ref
+        .read(vendorRepositoryProvider)
+        .supportTicket('${ticket['id']}');
+    if (!mounted) return;
+    final reply = TextEditingController();
+    await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(builder: (context, update) {
+              final messages = apiItems(detail['messages']);
+              final terminal =
+                  ['closed', 'resolved'].contains('${detail['status']}');
+              return AlertDialog(
+                  title: Text('${detail['subject']}'),
+                  content: SizedBox(
+                      width: (MediaQuery.sizeOf(context).width - 72)
+                          .clamp(260.0, 480.0),
+                      height: (MediaQuery.sizeOf(context).height * .58)
+                          .clamp(300.0, 520.0),
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Flexible(
+                            child: ListView(
+                                shrinkWrap: true,
+                                children: messages
+                                    .map((m) => Container(
+                                        margin:
+                                            const EdgeInsets.only(bottom: 8),
+                                        padding: const EdgeInsets.all(10),
+                                        decoration: BoxDecoration(
+                                            color:
+                                                '${m['sender_type']}' == 'admin'
+                                                    ? AppColors.accent
+                                                    : Colors.grey.shade100,
+                                            borderRadius:
+                                                BorderRadius.circular(10)),
+                                        child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                  '${m['sender_type']}' ==
+                                                          'admin'
+                                                      ? 'Support'
+                                                      : 'You',
+                                                  style: const TextStyle(
+                                                      fontWeight:
+                                                          FontWeight.bold)),
+                                              Text('${m['message']}')
+                                            ])))
+                                    .toList())),
+                        if (!terminal)
+                          Row(children: [
+                            Expanded(
+                                child: TextField(
+                                    controller: reply,
+                                    decoration: const InputDecoration(
+                                        hintText: 'Reply to support'))),
+                            IconButton(
+                                onPressed: () async {
+                                  if (reply.text.trim().length < 2) return;
+                                  detail = await ref
+                                      .read(vendorRepositoryProvider)
+                                      .sendSupportMessage(
+                                          '${detail['id']}', reply.text.trim());
+                                  reply.clear();
+                                  update(() {});
+                                  setState(() {});
+                                },
+                                icon: const Icon(Icons.send_rounded))
+                          ])
+                      ])),
+                  actions: [
+                    if (!terminal)
+                      TextButton(
+                          onPressed: () async {
+                            detail = await ref
+                                .read(vendorRepositoryProvider)
+                                .closeSupportTicket('${detail['id']}');
+                            update(() {});
+                            setState(() {});
+                          },
+                          child: const Text('Close ticket')),
+                    TextButton(
+                        onPressed: () => Navigator.pop(dialogContext),
+                        child: const Text('Done'))
+                  ]);
+            }));
+  }
+
+  @override
+  Widget build(BuildContext context) => VendorScaffold(
+      title: 'Support',
+      child: ListView(padding: VendorLayout.pagePadding(context), children: [
+        const VendorPageIntro(
+          icon: Icons.support_agent_rounded,
+          title: 'Partner support',
+          subtitle:
+              'Create, follow and resolve support requests without losing momentum.',
+        ),
+        const SizedBox(height: 16),
+        FilledButton.icon(
+            onPressed: _createTicket,
+            icon: const Icon(Icons.add_rounded),
+            label: const Text('Create Ticket')),
+        const SizedBox(height: 16),
+        FutureBuilder<List<Map<String, dynamic>>>(
+            future: ref.read(vendorRepositoryProvider).supportTickets(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              final tickets = snapshot.data ?? [];
+              if (tickets.isEmpty) {
+                return const EmptyState(
+                    icon: Icons.help_outline_rounded,
+                    title: 'No support tickets',
+                    subtitle: 'Create a request when you need help.');
+              }
+              return Column(
+                  children: tickets
+                      .map((t) => Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: AppCard(
+                              child: ListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  title: Text('${t['subject']}',
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.bold)),
+                                  subtitle: Text(
+                                      '${t['category']} · ${t['priority']}'),
+                                  trailing: Text(
+                                      '${t['status']}'.replaceAll('_', ' ')),
+                                  onTap: () => _openTicket(t)))))
+                      .toList());
+            })
+      ]));
+
+  Future<void> _createTicket() async {
+    final vendor = ref.read(authStateProvider).valueOrNull;
+    if (vendor == null) return;
+    final subject = TextEditingController(),
+        description = TextEditingController();
+    var category = 'vendor', priority = 'medium';
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+                title: const Text('Create Support Ticket'),
+                content: SingleChildScrollView(
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  TextField(
+                      controller: subject,
+                      decoration: const InputDecoration(labelText: 'Subject')),
+                  const SizedBox(height: 10),
+                  TextField(
+                      controller: description,
+                      minLines: 3,
+                      maxLines: 5,
+                      decoration:
+                          const InputDecoration(labelText: 'Description')),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                      initialValue: category,
+                      decoration: const InputDecoration(labelText: 'Category'),
+                      items: const [
+                        DropdownMenuItem(
+                            value: 'vendor', child: Text('Vendor')),
+                        DropdownMenuItem(
+                            value: 'orders', child: Text('Orders')),
+                        DropdownMenuItem(
+                            value: 'payments', child: Text('Payments')),
+                        DropdownMenuItem(
+                            value: 'technical', child: Text('Technical'))
+                      ],
+                      onChanged: (v) => category = v ?? category),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                      initialValue: priority,
+                      decoration: const InputDecoration(labelText: 'Priority'),
+                      items: const [
+                        DropdownMenuItem(value: 'low', child: Text('Low')),
+                        DropdownMenuItem(
+                            value: 'medium', child: Text('Medium')),
+                        DropdownMenuItem(value: 'high', child: Text('High'))
+                      ],
+                      onChanged: (v) => priority = v ?? priority)
+                ])),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      child: const Text('Cancel')),
+                  FilledButton(
+                      onPressed: () => Navigator.pop(context, true),
+                      child: const Text('Submit'))
+                ]));
+    if (ok != true ||
+        subject.text.trim().length < 4 ||
+        description.text.trim().length < 2) {
+      return;
+    }
+    await ref.read(vendorRepositoryProvider).createSupportTicket(
+        vendorId: vendor.id,
+        vendorName:
+            vendor.businessName.isNotEmpty ? vendor.businessName : vendor.name,
+        subject: subject.text.trim(),
+        description: description.text.trim(),
+        category: category,
+        priority: priority);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Support ticket created')));
+      setState(() {});
+    }
+  }
+}
+
+class _NotificationsPage extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final notifications = ref.watch(vendorNotificationsProvider);
+    return VendorScaffold(
+      title: 'Notifications',
+      child: notifications.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, _) => Center(child: Text('$e')),
+        data: (rows) {
+          if (rows.isEmpty) {
+            return ListView(
+              padding: VendorLayout.pagePadding(context),
+              children: const [
+                VendorPageIntro(
+                  icon: Icons.notifications_active_rounded,
+                  title: 'Business notifications',
+                  subtitle:
+                      'Stay ahead of orders, bookings, payments and important account updates.',
+                ),
+                SizedBox(height: 16),
+                EmptyState(
+                    icon: Icons.notifications_none_rounded,
+                    title: 'No notifications yet'),
+              ],
+            );
+          }
+          return RefreshIndicator(
+            onRefresh: () => ref.refresh(vendorNotificationsProvider.future),
+            child: ListView.separated(
+              padding: VendorLayout.pagePadding(context),
+              itemCount: rows.length + 1,
+              separatorBuilder: (_, __) => const SizedBox(height: 10),
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  return const VendorPageIntro(
+                    icon: Icons.notifications_active_rounded,
+                    title: 'Business notifications',
+                    subtitle:
+                        'Stay ahead of orders, bookings, payments and important account updates.',
+                  );
+                }
+                final item = rows[index - 1];
+                final isUnread =
+                    item['status']?.toString().toLowerCase() != 'read';
+                final metadata = item['metadata'] is Map
+                    ? Map<String, dynamic>.from(item['metadata'] as Map)
+                    : const <String, dynamic>{};
+                final deepLink = (metadata['deepLink'] ??
+                        metadata['deep_link'] ??
+                        item['deepLink'] ??
+                        item['deep_link'] ??
+                        '')
+                    .toString()
+                    .trim();
+                return AppCard(
+                  child: ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(
+                      isUnread
+                          ? Icons.notifications_active_rounded
+                          : Icons.notifications_none_rounded,
+                      color: isUnread
+                          ? Theme.of(context).colorScheme.primary
+                          : AppColors.muted,
+                    ),
+                    title: Text(
+                      item['title']?.toString().isNotEmpty == true
+                          ? item['title'].toString()
+                          : 'Notification',
+                      style: TextStyle(
+                          fontWeight:
+                              isUnread ? FontWeight.w600 : FontWeight.w600),
+                    ),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (item['body']?.toString().isNotEmpty == true)
+                          Text(item['body'].toString()),
+                        if (item['created_at']?.toString().isNotEmpty == true)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(item['created_at'].toString(),
+                                style: const TextStyle(
+                                    fontSize: 12, color: AppColors.muted)),
+                          ),
+                      ],
+                    ),
+                    onTap: !isUnread && deepLink.isEmpty
+                        ? null
+                        : () async {
+                            if (isUnread) {
+                              try {
+                                await ref
+                                    .read(vendorRepositoryProvider)
+                                    .markNotificationRead(
+                                        item['id']?.toString() ?? '');
+                              } finally {
+                                ref.invalidate(vendorNotificationsProvider);
+                              }
+                            }
+                            if (context.mounted && deepLink.isNotEmpty) {
+                              context.push(vendorRouteForDeepLink(deepLink));
+                            }
+                          },
+                  ),
+                );
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _SettingsPage extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return VendorScaffold(
+      title: 'Settings',
+      child: ListView(
+        padding: VendorLayout.pagePadding(context),
+        children: [
+          const VendorPageIntro(
+            icon: Icons.tune_rounded,
+            title: 'Vendor settings',
+            subtitle:
+                'Keep your workspace secure, focused and configured for your business.',
+          ),
+          const SizedBox(height: 16),
+          AppCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Account Control',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                const Text(
+                    'Deactivate or request deletion of your vendor account from the support team.',
+                    style: TextStyle(color: AppColors.muted)),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                    onPressed: () => context.push('/account-control'),
+                    icon: const Icon(Icons.warning_amber_rounded),
+                    label: const Text('Request Account Action')),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: () async {
+              await ref.read(authRepositoryProvider).signOut();
+              if (context.mounted) context.go('/login');
+            },
+            icon: const Icon(Icons.logout_rounded),
+            label: const Text('Logout'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WalletPage extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final stats = ref.watch(settlementStatsProvider);
+    return VendorScaffold(
+      title: 'Wallet',
+      child: stats.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, _) => Center(child: Text('$e')),
+        data: (s) => ListView(
+          padding: VendorLayout.pagePadding(context),
+          children: [
+            const VendorPageIntro(
+              icon: Icons.account_balance_wallet_rounded,
+              title: 'Business wallet',
+              subtitle: 'Understand pending and completed value at a glance.',
+            ),
+            const SizedBox(height: 16),
+            MetricCard(
+                icon: Icons.account_balance_wallet_rounded,
+                label: 'Available / Pending',
+                value: 'Rs.${s.pending.toStringAsFixed(0)}'),
+            const SizedBox(height: 12),
+            MetricCard(
+                icon: Icons.check_circle_rounded,
+                label: 'Settled',
+                value: 'Rs.${s.settled.toStringAsFixed(0)}'),
+            const SizedBox(height: 12),
+            const AppCard(
+                child: Text(
+                    'Vendor wallet is derived from settlement records so balances stay aligned with the existing backend business logic.')),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AccountControlPage extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return VendorScaffold(
+      title: 'Account Control',
+      child: ListView(
+        padding: VendorLayout.pagePadding(context),
+        children: [
+          const VendorPageIntro(
+            icon: Icons.admin_panel_settings_rounded,
+            title: 'Account control',
+            subtitle:
+                'Manage sensitive account actions with clarity and confidence.',
+          ),
+          const SizedBox(height: 16),
+          const Text('Deactivating or deleting your P4U vendor account',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          const Text(
+              'Deactivate temporarily to hide your store, or request deletion if you want to permanently leave the platform.',
+              style: TextStyle(color: AppColors.muted)),
+          const SizedBox(height: 16),
+          AppCard(
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Deactivate account',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'Temporarily hide your store, products, and services.'),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: () => _request(context, ref, 'deactivate'),
+            ),
+          ),
+          const SizedBox(height: 12),
+          AppCard(
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Delete account',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w600, color: Colors.red)),
+              subtitle: const Text(
+                  'Request permanent deletion. Data retention follows audit rules.'),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: () => _request(context, ref, 'delete'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _request(
+      BuildContext context, WidgetRef ref, String action) async {
+    final vendorId = ref.read(vendorIdProvider);
+    if (vendorId == null) return;
+    final reason = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(
+            action == 'delete' ? 'Delete account?' : 'Deactivate account?'),
+        content: TextField(
+            controller: reason,
+            minLines: 3,
+            maxLines: 4,
+            decoration: const InputDecoration(labelText: 'Reason')),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Confirm')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (action == 'delete') {
+      await ref
+          .read(vendorRepositoryProvider)
+          .softDeleteVendor(vendorId, reason.text.trim());
+    } else {
+      await ref
+          .read(vendorRepositoryProvider)
+          .deactivateVendor(vendorId, reason.text.trim());
+    }
+    await ref.read(authRepositoryProvider).signOut();
+    if (context.mounted) context.go('/login');
+  }
+}
