@@ -1,6 +1,7 @@
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/utils/async_value_ui.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
@@ -21,7 +22,7 @@ class DashboardPage extends ConsumerWidget {
         NumberFormat.currency(locale: 'en_IN', symbol: 'Rs.', decimalDigits: 0);
     return VendorScaffold(
       title: 'Business Hub',
-      child: data.when(
+      child: data.whenUi(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) => _ErrorCard(message: '$error'),
         data: (dashboard) {

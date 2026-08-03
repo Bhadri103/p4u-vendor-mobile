@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/utils/async_value_ui.dart';
 import 'package:intl/intl.dart';
 
 import '../../../../core/theme/app_theme.dart';
@@ -69,7 +70,7 @@ class SettlementsPage extends ConsumerWidget {
                   child: Center(child: CircularProgressIndicator())),
             ),
             const SizedBox(height: 16),
-            settlements.when(
+            settlements.whenUi(
               loading: () => const Center(child: CircularProgressIndicator()),
               error: (e, _) => Text('$e'),
               data: (items) => items.isEmpty

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/utils/async_value_ui.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -23,7 +24,7 @@ class ProfilePage extends ConsumerWidget {
     final dashboard = ref.watch(dashboardProvider);
     return VendorScaffold(
       title: 'Business Profile',
-      child: profile.when(
+      child: profile.whenUi(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('$e')),
         data: (vendor) => ListView(

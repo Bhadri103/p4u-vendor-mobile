@@ -92,13 +92,13 @@ class VendorPageIntro extends StatelessWidget {
     final wide = width >= 700;
     final imageWidth = (width * .42).clamp(180.0, 360.0);
     return TweenAnimationBuilder<double>(
-      duration: const Duration(milliseconds: 560),
+      duration: const Duration(milliseconds: 180),
       curve: Curves.easeOutCubic,
       tween: Tween(begin: 0, end: 1),
       builder: (context, value, child) => Opacity(
         opacity: value,
         child: Transform.translate(
-          offset: Offset(0, 18 * (1 - value)),
+          offset: Offset(0, 8 * (1 - value)),
           child: child,
         ),
       ),

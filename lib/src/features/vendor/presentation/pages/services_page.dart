@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/utils/async_value_ui.dart';
 import 'package:intl/intl.dart';
 
 import '../../../../core/theme/app_theme.dart';
@@ -56,7 +57,7 @@ class _ServicesPageState extends ConsumerState<ServicesPage> {
           icon: const Icon(Icons.add_rounded),
         )
       ],
-      child: services.when(
+      child: services.whenUi(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('$e')),
         data: (items) {
@@ -544,7 +545,7 @@ class _ServiceFormSheetState extends ConsumerState<_ServiceFormSheet> {
             const SizedBox(height: 10),
 
             // ── Category / Subcategory ──
-            categories.when(
+            categories.whenUi(
               loading: () => const LinearProgressIndicator(),
               error: (e, _) => Text('Failed to load categories: $e',
                   style: const TextStyle(color: Colors.red, fontSize: 12)),
@@ -569,7 +570,7 @@ class _ServiceFormSheetState extends ConsumerState<_ServiceFormSheet> {
               ),
             ),
             const SizedBox(height: 10),
-            catalog.when(
+            catalog.whenUi(
               loading: () => const LinearProgressIndicator(),
               error: (e, _) => Text('Failed to load services: $e',
                   style: const TextStyle(color: Colors.red, fontSize: 12)),

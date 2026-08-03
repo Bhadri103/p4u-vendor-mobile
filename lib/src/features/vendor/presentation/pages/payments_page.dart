@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/utils/async_value_ui.dart';
 
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/widgets/vendor_scaffold.dart';
@@ -24,7 +25,7 @@ class PaymentsPage extends ConsumerWidget {
           ref.invalidate(settlementStatsProvider);
           await ref.read(vendorSettlementsProvider.future);
         },
-        child: settlements.when(
+        child: settlements.whenUi(
           loading: () => const Center(child: CircularProgressIndicator()),
           error: (e, _) => Center(child: Text('$e')),
           data: (items) {

@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/utils/async_value_ui.dart';
 import 'package:intl/intl.dart';
 
 import '../../../../core/theme/app_theme.dart';
@@ -101,7 +102,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
               ref.invalidate(vendorOrdersProvider);
               ref.invalidate(vendorSettlementsProvider);
             },
-            child: data.when(
+            child: data.whenUi(
               loading: () => const Center(child: CircularProgressIndicator()),
               error: (error, _) => ListView(children: [
                 const SizedBox(height: 160),

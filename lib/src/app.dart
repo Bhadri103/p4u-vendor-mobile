@@ -30,6 +30,10 @@ void openVendorDeepLink(String raw) {
   _vendorRouter?.go(vendorRouteForDeepLink(raw));
 }
 
+Page<void> _modulePage(Widget child, GoRouterState state) {
+  return NoTransitionPage<void>(key: state.pageKey, child: child);
+}
+
 final routerProvider = Provider<GoRouter>((ref) {
   return _vendorRouter = GoRouter(
     initialLocation: '/splash',
@@ -38,58 +42,124 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/login', builder: (_, __) => const VendorLoginPage()),
       GoRoute(
           path: '/register', builder: (_, __) => const VendorRegisterPage()),
-      GoRoute(path: '/', builder: (_, __) => const DashboardPage()),
-      GoRoute(path: '/products', builder: (_, __) => const ProductsPage()),
-      GoRoute(path: '/services', builder: (_, __) => const ServicesPage()),
       GoRoute(
-          path: '/availability', builder: (_, __) => const AvailabilityPage()),
-      GoRoute(path: '/orders', builder: (_, __) => const OrdersPage()),
+        path: '/',
+        pageBuilder: (context, state) =>
+            _modulePage(const DashboardPage(), state),
+      ),
+      GoRoute(
+        path: '/products',
+        pageBuilder: (context, state) =>
+            _modulePage(const ProductsPage(), state),
+      ),
+      GoRoute(
+        path: '/services',
+        pageBuilder: (context, state) =>
+            _modulePage(const ServicesPage(), state),
+      ),
+      GoRoute(
+        path: '/availability',
+        pageBuilder: (context, state) =>
+            _modulePage(const AvailabilityPage(), state),
+      ),
+      GoRoute(
+        path: '/orders',
+        pageBuilder: (context, state) =>
+            _modulePage(const OrdersPage(), state),
+      ),
       GoRoute(
         path: '/orders/:orderId',
         builder: (_, state) => OrderDetailsPage(
           orderId: state.pathParameters['orderId']!,
         ),
       ),
-      GoRoute(path: '/bookings', builder: (_, __) => const BookingsPage()),
       GoRoute(
-          path: '/settlements', builder: (_, __) => const SettlementsPage()),
-      GoRoute(path: '/payments', builder: (_, __) => const PaymentsPage()),
-      GoRoute(path: '/reports', builder: (_, __) => const ReportsPage()),
+        path: '/bookings',
+        pageBuilder: (context, state) =>
+            _modulePage(const BookingsPage(), state),
+      ),
       GoRoute(
-          path: '/wallet',
-          builder: (_, __) =>
-              const SimpleVendorPage(kind: SimpleVendorKind.wallet)),
-      GoRoute(path: '/bank', builder: (_, __) => const BankAccountsPage()),
-      GoRoute(path: '/media', builder: (_, __) => const MediaLibraryPage()),
-      GoRoute(path: '/profile', builder: (_, __) => const ProfilePage()),
-      GoRoute(path: '/kyc', builder: (_, __) => const VendorKycPage()),
-      GoRoute(path: '/plans', builder: (_, __) => const VendorPlansPage()),
+        path: '/settlements',
+        pageBuilder: (context, state) =>
+            _modulePage(const SettlementsPage(), state),
+      ),
       GoRoute(
-          path: '/dropshipping', builder: (_, __) => const DropshippingPage()),
+        path: '/payments',
+        pageBuilder: (context, state) =>
+            _modulePage(const PaymentsPage(), state),
+      ),
       GoRoute(
-          path: '/settings',
-          builder: (_, __) =>
-              const SimpleVendorPage(kind: SimpleVendorKind.settings)),
+        path: '/reports',
+        pageBuilder: (context, state) =>
+            _modulePage(const ReportsPage(), state),
+      ),
       GoRoute(
-          path: '/account-control',
-          builder: (_, __) =>
-              const SimpleVendorPage(kind: SimpleVendorKind.accountControl)),
+        path: '/wallet',
+        pageBuilder: (context, state) => _modulePage(
+            const SimpleVendorPage(kind: SimpleVendorKind.wallet), state),
+      ),
       GoRoute(
-          path: '/analytics',
-          builder: (_, __) =>
-              const SimpleVendorPage(kind: SimpleVendorKind.analytics)),
+        path: '/bank',
+        pageBuilder: (context, state) =>
+            _modulePage(const BankAccountsPage(), state),
+      ),
       GoRoute(
-          path: '/reviews',
-          builder: (_, __) =>
-              const SimpleVendorPage(kind: SimpleVendorKind.reviews)),
+        path: '/media',
+        pageBuilder: (context, state) =>
+            _modulePage(const MediaLibraryPage(), state),
+      ),
       GoRoute(
-          path: '/support',
-          builder: (_, __) =>
-              const SimpleVendorPage(kind: SimpleVendorKind.support)),
+        path: '/profile',
+        pageBuilder: (context, state) =>
+            _modulePage(const ProfilePage(), state),
+      ),
       GoRoute(
-          path: '/notifications',
-          builder: (_, __) =>
-              const SimpleVendorPage(kind: SimpleVendorKind.notifications)),
+        path: '/kyc',
+        pageBuilder: (context, state) =>
+            _modulePage(const VendorKycPage(), state),
+      ),
+      GoRoute(
+        path: '/plans',
+        pageBuilder: (context, state) =>
+            _modulePage(const VendorPlansPage(), state),
+      ),
+      GoRoute(
+        path: '/dropshipping',
+        pageBuilder: (context, state) =>
+            _modulePage(const DropshippingPage(), state),
+      ),
+      GoRoute(
+        path: '/settings',
+        pageBuilder: (context, state) => _modulePage(
+            const SimpleVendorPage(kind: SimpleVendorKind.settings), state),
+      ),
+      GoRoute(
+        path: '/account-control',
+        pageBuilder: (context, state) => _modulePage(
+            const SimpleVendorPage(kind: SimpleVendorKind.accountControl),
+            state),
+      ),
+      GoRoute(
+        path: '/analytics',
+        pageBuilder: (context, state) => _modulePage(
+            const SimpleVendorPage(kind: SimpleVendorKind.analytics), state),
+      ),
+      GoRoute(
+        path: '/reviews',
+        pageBuilder: (context, state) => _modulePage(
+            const SimpleVendorPage(kind: SimpleVendorKind.reviews), state),
+      ),
+      GoRoute(
+        path: '/support',
+        pageBuilder: (context, state) => _modulePage(
+            const SimpleVendorPage(kind: SimpleVendorKind.support), state),
+      ),
+      GoRoute(
+        path: '/notifications',
+        pageBuilder: (context, state) => _modulePage(
+            const SimpleVendorPage(kind: SimpleVendorKind.notifications),
+            state),
+      ),
     ],
   );
 });

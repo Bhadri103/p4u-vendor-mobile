@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/utils/async_value_ui.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/widgets/app_card.dart';
 import '../../../../core/widgets/vendor_page_intro.dart';
@@ -77,7 +78,7 @@ class _VendorKycPageState extends ConsumerState<VendorKycPage> {
     final profile = ref.watch(vendorProfileProvider);
     return VendorScaffold(
         title: 'KYC & Verification',
-        child: profile.when(
+        child: profile.whenUi(
             loading: () => const Center(child: CircularProgressIndicator()),
             error: (e, _) => Center(child: Text('$e')),
             data: (vendor) {

@@ -259,12 +259,7 @@ class _VendorBottomNav extends StatelessWidget {
                   borderRadius: BorderRadius.circular(18),
                   onTap: () {
                     if (index != selectedIndex) {
-                      final path = destinations[index].path;
-                      if (path == '/') {
-                        context.go(path);
-                      } else {
-                        context.push(path);
-                      }
+                      context.go(destinations[index].path);
                     }
                   },
                   child: Column(
@@ -439,10 +434,8 @@ class _VendorDrawer extends ConsumerWidget {
                           ),
                           onTap: () {
                             Navigator.pop(context);
-                            if (item.path == '/') {
+                            if (item.path != activePath) {
                               context.go(item.path);
-                            } else if (item.path != activePath) {
-                              context.push(item.path);
                             }
                           },
                         ),

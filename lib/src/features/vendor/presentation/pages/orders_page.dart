@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/utils/async_value_ui.dart';
 import 'package:intl/intl.dart';
 import 'package:go_router/go_router.dart';
 
@@ -20,7 +21,7 @@ class OrdersPage extends ConsumerWidget {
     final orders = ref.watch(vendorOrdersProvider);
     return VendorScaffold(
       title: 'Orders',
-      child: orders.when(
+      child: orders.whenUi(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('$e')),
         data: (items) {
