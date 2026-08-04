@@ -325,9 +325,6 @@ class _VendorDrawer extends ConsumerWidget {
             'Availability', '/availability', Icons.calendar_month_rounded),
       if (hasProduct)
         const _Destination('Orders', '/orders', Icons.shopping_cart_rounded),
-      if (hasProduct)
-        const _Destination(
-            'Dropshipping', '/dropshipping', Icons.local_shipping_rounded),
       if (hasService)
         const _Destination(
             'Bookings', '/bookings', Icons.event_available_rounded),

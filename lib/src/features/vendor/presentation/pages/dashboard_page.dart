@@ -180,9 +180,6 @@ class DashboardPage extends ConsumerWidget {
                       const _QuickLink(
                           'Reports', '/reports', _QuickArt.reports),
                       const _QuickLink('Bank A/C', '/bank', _QuickArt.bank),
-                      if (!isServiceOnly)
-                        const _QuickLink(
-                            'Dropship', '/dropshipping', _QuickArt.dropship),
                       const _QuickLink('KYC', '/kyc', _QuickArt.kyc),
                       const _QuickLink('Plans', '/plans', _QuickArt.plans),
                     ],
