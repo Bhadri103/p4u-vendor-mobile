@@ -328,6 +328,15 @@ Future<void> _showProductForm(BuildContext context, WidgetRef ref,
     }
   }
   if (!context.mounted) return;
+  List<Map<String, dynamic>> categories = const [];
+  try {
+    categories = await ref
+        .read(vendorRepositoryProvider)
+        .registrationProductCategories();
+  } catch (_) {
+    // Saving remains available for an existing category if catalog refresh fails.
+  }
+  if (!context.mounted) return;
   final title = TextEditingController(text: item?['title']?.toString() ?? '');
   final sku = TextEditingController(text: item?['sku']?.toString() ?? '');
   final price = TextEditingController(text: item?['price']?.toString() ?? '');
@@ -436,23 +445,20 @@ Future<void> _showProductForm(BuildContext context, WidgetRef ref,
               label: const Text('Upload Product Image'),
             ),
             const SizedBox(height: 10),
-            Row(children: [
-              Expanded(
-                  child: TextField(
-                      controller: category,
-                      decoration:
-                          const InputDecoration(labelText: 'Category ID'))),
-              const SizedBox(width: 10),
-              Expanded(
-                  child: TextField(
-                      controller: subcategory,
-                      decoration:
-                          const InputDecoration(labelText: 'Subcategory ID'))),
-            ]),
-            const SizedBox(height: 10),
-            TextField(
-                controller: parentItem,
-                decoration: const InputDecoration(labelText: 'Parent Item ID')),
+            DropdownButtonFormField<String>(
+              initialValue: categories.any(
+                      (row) => row['id']?.toString() == category.text)
+                  ? category.text
+                  : null,
+              decoration: const InputDecoration(labelText: 'Category'),
+              items: categories
+                  .map((row) => DropdownMenuItem(
+                        value: row['id']?.toString(),
+                        child: Text(row['name']?.toString() ?? 'Category'),
+                      ))
+                  .toList(),
+              onChanged: (value) => category.text = value ?? '',
+            ),
             const SizedBox(height: 10),
             Row(children: [
               Expanded(

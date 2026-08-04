@@ -49,3 +49,6 @@ app.*.map.json
 **/gradlew
 **/gradlew.bat
 **/.kotlin/
+android/key.properties
+*.jks
+*.keystore

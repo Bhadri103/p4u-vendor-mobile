@@ -11,7 +11,6 @@ import 'features/vendor/presentation/pages/availability_page.dart';
 import 'features/vendor/presentation/pages/bank_accounts_page.dart';
 import 'features/vendor/presentation/pages/bookings_page.dart';
 import 'features/vendor/presentation/pages/dashboard_page.dart';
-import 'features/vendor/presentation/pages/dropshipping_page.dart';
 import 'features/vendor/presentation/pages/media_library_page.dart';
 import 'features/vendor/presentation/pages/order_details_page.dart';
 import 'features/vendor/presentation/pages/orders_page.dart';
@@ -123,11 +122,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         pageBuilder: (context, state) =>
             _modulePage(const VendorPlansPage(), state),
       ),
-      GoRoute(
-        path: '/dropshipping',
-        pageBuilder: (context, state) =>
-            _modulePage(const DropshippingPage(), state),
-      ),
+      GoRoute(path: '/dropshipping', redirect: (_, __) => '/'),
       GoRoute(
         path: '/settings',
         pageBuilder: (context, state) => _modulePage(

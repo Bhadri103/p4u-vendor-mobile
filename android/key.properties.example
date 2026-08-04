@@ -1,0 +1,4 @@
+storeFile=C:\\secure\\p4u-vendor-release.jks
+storePassword=replace-me
+keyAlias=p4u-vendor
+keyPassword=replace-me

@@ -2,7 +2,7 @@ String vendorRouteForDeepLink(String raw) {
   final path = Uri.tryParse(raw)?.path ?? raw;
   final normalized = path.toLowerCase();
   return switch (normalized) {
-    _ when normalized.contains('/dropshipping') => '/dropshipping',
+    _ when normalized.contains('/dropshipping') => '/',
     _ when normalized.contains('/bookings') => '/bookings',
     _ when normalized.contains('/orders') => '/orders',
     _ when normalized.contains('/settlements') => '/settlements',
