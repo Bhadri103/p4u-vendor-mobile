@@ -48,11 +48,21 @@ android {
 
     buildTypes {
         release {
-            if (!hasP4uSigning) {
-                throw GradleException("Vendor release signing requires android/key.properties")
+            if (hasP4uSigning) {
+                signingConfig = signingConfigs.getByName("p4uVendor")
             }
-            signingConfig = signingConfigs.getByName("p4uVendor")
         }
+    }
+}
+
+// Build types are configured for every Gradle invocation, including debug.
+// Enforce the private key only when a release task is actually requested.
+gradle.taskGraph.whenReady {
+    val releaseRequested = allTasks.any { task ->
+        task.name.contains("release", ignoreCase = true)
+    }
+    if (releaseRequested && !hasP4uSigning) {
+        throw GradleException("Vendor release signing requires android/key.properties")
     }
 }
 
